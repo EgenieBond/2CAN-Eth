@@ -1,0 +1,4 @@
+../Core/Src/raw_tcp_server.c:20:14:tcp_server_recv	40	static
+../Core/Src/raw_tcp_server.c:88:13:tcp_server_error	16	static
+../Core/Src/raw_tcp_server.c:95:14:tcp_server_accept	48	static
+../Core/Src/raw_tcp_server.c:137:6:RawTcpServer_Init	16	static

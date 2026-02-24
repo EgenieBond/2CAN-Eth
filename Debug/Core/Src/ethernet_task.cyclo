@@ -1,0 +1,4 @@
+../Core/Src/ethernet_task.c:28:13:PHY_Scan	2
+../Core/Src/ethernet_task.c:47:13:tcp_server_init_cb	1
+../Core/Src/ethernet_task.c:55:6:EthernetTask	2
+../Core/Src/ethernet_task.c:104:6:EthernetTask_Start	2

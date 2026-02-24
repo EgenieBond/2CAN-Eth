@@ -1,0 +1,3 @@
+../Core/Src/debug_uart.c:27:6:DebugUART_InitMutex	8	static
+../Core/Src/debug_uart.c:37:6:DebugUART_Init	4	static
+../Core/Src/debug_uart.c:42:6:DebugUART_Print	280	static
