@@ -119,8 +119,8 @@
  #define IP_ADDR3   100
 
  #define NETMASK_ADDR0   255
- #define NETMASK_ADDR1   0
- #define NETMASK_ADDR2   0
+ #define NETMASK_ADDR1   255
+ #define NETMASK_ADDR2   255
  #define NETMASK_ADDR3   0
 
  #define GW_ADDR0   10
@@ -144,6 +144,24 @@
  #define TCP_MSS                 1460
  #define TCP_SND_BUF             (4 * TCP_MSS)
  #define TCP_WND                 (4 * TCP_MSS)
+
+ /* ===== lwIP debug to track SYN/ACK/ARP ===== */
+ #define LWIP_DEBUG 1
+ #define LWIP_DBG_TYPES_ON (LWIP_DBG_ON | LWIP_DBG_LEVEL_ALL)
+
+ #define TCP_DEBUG  LWIP_DBG_ON
+ #define IP_DEBUG   LWIP_DBG_ON
+ #define ETHARP_DEBUG LWIP_DBG_ON
+ #define NETIF_DEBUG LWIP_DBG_ON
+
+ /* --- Debug output redirection (no redefinition warnings) --- */
+ #ifndef LWIP_PLATFORM_DIAG
+ #define LWIP_PLATFORM_DIAG(x) do { DebugUART_Print x; } while(0)
+ #endif
+
+ #ifndef LWIP_PLATFORM_ASSERT
+ #define LWIP_PLATFORM_ASSERT(x) do { DebugUART_Print("[LWIP-ASSERT] %s\r\n", x); for(;;); } while(0)
+ #endif
 
  /* USER CODE END 1 */
 
