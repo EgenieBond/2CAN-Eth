@@ -64,7 +64,7 @@ void MX_LWIP_Init(void)
 {
   /* IP addresses initialization */
 	IP4_ADDR(&ipaddr, 10, 0, 0, 100);
-	IP4_ADDR(&netmask, 255, 0, 0, 0);
+	IP4_ADDR(&netmask, 255, 255, 255, 0);
 	IP4_ADDR(&gw, 10, 0, 0, 1);
 
 /* USER CODE BEGIN IP_ADDRESSES */

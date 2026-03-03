@@ -1,4 +1,6 @@
-../Core/Src/raw_tcp_server.c:20:14:tcp_server_recv	40	static
-../Core/Src/raw_tcp_server.c:88:13:tcp_server_error	16	static
-../Core/Src/raw_tcp_server.c:95:14:tcp_server_accept	48	static
-../Core/Src/raw_tcp_server.c:137:6:RawTcpServer_Init	16	static
+../Core/Src/raw_tcp_server.c:23:14:tcp_server_connected	24	static
+../Core/Src/raw_tcp_server.c:32:14:tcp_server_sent	24	static
+../Core/Src/raw_tcp_server.c:41:14:tcp_server_recv	40	static
+../Core/Src/raw_tcp_server.c:113:13:tcp_server_error	16	static
+../Core/Src/raw_tcp_server.c:122:14:tcp_server_accept	48	static
+../Core/Src/raw_tcp_server.c:176:6:RawTcpServer_Init	16	static

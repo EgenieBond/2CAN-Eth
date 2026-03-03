@@ -176,6 +176,16 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM_D1
+  
+    /* ===== lwIP heap region (must NOT overlap .bss / FreeRTOS heap) ===== */
+  .lwip_heap (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __lwip_heap_start__ = .;
+    . = . + 0x10000;            /* 64 KB for lwIP heap (adjust if needed) */
+    __lwip_heap_end__ = .;
+    . = ALIGN(32);
+  } >RAM_D1
 
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack :

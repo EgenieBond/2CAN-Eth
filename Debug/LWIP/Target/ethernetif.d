@@ -76,7 +76,7 @@ LWIP/Target/ethernetif.o: ../LWIP/Target/ethernetif.c ../Core/Inc/main.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/ethip6.h \
  ../LWIP/Target/ethernetif.h ../Drivers/BSP/Components/lan8742/lan8742.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h \
- ../Core/Inc/raw_tcp_server.h
+ ../Core/Inc/raw_tcp_server.h ../Core/Inc/eth_events.h
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -157,3 +157,4 @@ C:/Users/Egenie/STM32CubeIDE/Repository/STM32Cube_FW_H7_V1.12.0/Middlewares/Thir
 ../Drivers/BSP/Components/lan8742/lan8742.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h:
 ../Core/Inc/raw_tcp_server.h:
+../Core/Inc/eth_events.h:

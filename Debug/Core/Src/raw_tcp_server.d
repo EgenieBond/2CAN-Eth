@@ -60,6 +60,7 @@ Core/Src/raw_tcp_server.o: ../Core/Src/raw_tcp_server.c \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/ip.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/icmp.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/icmp.h \
+ ../Middlewares/Third_Party/LwIP/src/include/lwip/inet.h \
  ../Core/Inc/debug_uart.h
 ../Middlewares/Third_Party/LwIP/src/include/lwip/tcp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/opt.h:
@@ -123,4 +124,5 @@ Core/Src/raw_tcp_server.o: ../Core/Src/raw_tcp_server.c \
 ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/ip.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/icmp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/icmp.h:
+../Middlewares/Third_Party/LwIP/src/include/lwip/inet.h:
 ../Core/Inc/debug_uart.h:

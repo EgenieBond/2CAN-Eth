@@ -1,4 +1,6 @@
-../Core/Src/ethernet_task.c:28:13:PHY_Scan	56	static
-../Core/Src/ethernet_task.c:47:13:tcp_server_init_cb	16	static
-../Core/Src/ethernet_task.c:55:6:EthernetTask	32	static
-../Core/Src/ethernet_task.c:104:6:EthernetTask_Start	48	static
+../Core/Src/ethernet_task.c:46:13:DumpMemLayout	8	static
+../Core/Src/ethernet_task.c:59:13:PHY_Dump	56	static
+../Core/Src/ethernet_task.c:109:13:PHY_Scan	56	static
+../Core/Src/ethernet_task.c:128:13:tcp_server_init_cb	16	static
+../Core/Src/ethernet_task.c:137:6:EthernetTask	48	static
+../Core/Src/ethernet_task.c:236:6:EthernetTask_Start	48	static

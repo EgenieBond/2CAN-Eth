@@ -19,7 +19,7 @@
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:968:1:tcp_recved	6
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1011:1:tcp_new_port	6
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1067:1:tcp_connect	18
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:1192:1:tcp_slowtmr	63
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:1192:1:tcp_slowtmr	64
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1479:1:tcp_fasttmr	7
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1526:1:tcp_txnow	3
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1539:1:tcp_process_refused_data	9
@@ -41,8 +41,8 @@
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2057:1:tcp_err	3
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2076:1:tcp_accept	3
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2105:1:tcp_poll	3
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2127:1:tcp_pcb_purge	7
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2177:1:tcp_pcb_remove	13
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2127:1:tcp_pcb_purge	9
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2177:1:tcp_pcb_remove	14
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2215:1:tcp_next_iss	2
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2238:1:tcp_eff_send_mss_netif	5
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2299:1:tcp_netif_ip_addr_changed_pcblist	4
@@ -50,3 +50,8 @@
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2354:1:tcp_debug_state_str	1
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2360:1:tcp_tcp_get_tcp_addrinfo	7
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2386:1:tcp_free_ooseq	2
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2405:1:tcp_debug_print	1
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2441:1:tcp_debug_print_state	1
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2452:1:tcp_debug_print_flags	9
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2485:1:tcp_debug_print_pcbs	4
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:2517:1:tcp_pcbs_sane	7

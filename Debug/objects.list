@@ -1,4 +1,5 @@
 "./Core/Src/debug_uart.o"
+"./Core/Src/eth_events.o"
 "./Core/Src/ethernet_task.o"
 "./Core/Src/freertos.o"
 "./Core/Src/main.o"

@@ -30,6 +30,12 @@
 
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
+#include <stdint.h>
+
+/* These symbols are defined in STM32H723ZGTX_FLASH.ld (.lwip_heap section) */
+extern uint8_t __lwip_heap_start__;
+extern uint8_t __lwip_heap_end__;
+
 #define MEMP_NUM_SYS_TIMEOUT 10
 /* USER CODE END 0 */
 
@@ -52,7 +58,7 @@
 /*----- Value in opt.h for MEM_ALIGNMENT: 1 -----*/
 #define MEM_ALIGNMENT 4
 /*----- Default Value for F7/H7 devices: 0x30044000 -----*/
-#define LWIP_RAM_HEAP_POINTER 0x24000000
+#define LWIP_RAM_HEAP_POINTER ((uint32_t)&__lwip_heap_start__)
 /*----- Value supported for H7 devices: 1 -----*/
 #define LWIP_SUPPORT_CUSTOM_PBUF 1
 /*----- Value in opt.h for LWIP_ETHERNET: LWIP_ARP || PPPOE_SUPPORT -*/
@@ -119,8 +125,8 @@
  #define IP_ADDR3   100
 
  #define NETMASK_ADDR0   255
- #define NETMASK_ADDR1   0
- #define NETMASK_ADDR2   0
+ #define NETMASK_ADDR1   255
+ #define NETMASK_ADDR2   255
  #define NETMASK_ADDR3   0
 
  #define GW_ADDR0   10
@@ -144,6 +150,24 @@
  #define TCP_MSS                 1460
  #define TCP_SND_BUF             (4 * TCP_MSS)
  #define TCP_WND                 (4 * TCP_MSS)
+
+ /* ===== lwIP debug to track SYN/ACK/ARP ===== */
+ #define LWIP_DEBUG 1
+ #define LWIP_DBG_TYPES_ON (LWIP_DBG_ON | LWIP_DBG_LEVEL_ALL)
+
+ #define TCP_DEBUG  LWIP_DBG_ON
+ #define IP_DEBUG   LWIP_DBG_ON
+ #define ETHARP_DEBUG LWIP_DBG_ON
+ #define NETIF_DEBUG LWIP_DBG_ON
+
+ /* --- Debug output redirection (no redefinition warnings) --- */
+ #ifndef LWIP_PLATFORM_DIAG
+ #define LWIP_PLATFORM_DIAG(x) do { DebugUART_Print x; } while(0)
+ #endif
+
+ #ifndef LWIP_PLATFORM_ASSERT
+ #define LWIP_PLATFORM_ASSERT(x) do { DebugUART_Print("[LWIP-ASSERT] %s\r\n", x); for(;;); } while(0)
+ #endif
 
  /* USER CODE END 1 */
 
