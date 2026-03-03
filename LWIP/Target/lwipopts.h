@@ -30,6 +30,12 @@
 
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
+#include <stdint.h>
+
+/* These symbols are defined in STM32H723ZGTX_FLASH.ld (.lwip_heap section) */
+extern uint8_t __lwip_heap_start__;
+extern uint8_t __lwip_heap_end__;
+
 #define MEMP_NUM_SYS_TIMEOUT 10
 /* USER CODE END 0 */
 
@@ -52,7 +58,7 @@
 /*----- Value in opt.h for MEM_ALIGNMENT: 1 -----*/
 #define MEM_ALIGNMENT 4
 /*----- Default Value for F7/H7 devices: 0x30044000 -----*/
-#define LWIP_RAM_HEAP_POINTER 0x24000000
+#define LWIP_RAM_HEAP_POINTER ((uint32_t)&__lwip_heap_start__)
 /*----- Value supported for H7 devices: 1 -----*/
 #define LWIP_SUPPORT_CUSTOM_PBUF 1
 /*----- Value in opt.h for LWIP_ETHERNET: LWIP_ARP || PPPOE_SUPPORT -*/

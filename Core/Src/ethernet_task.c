@@ -34,9 +34,23 @@ extern UART_HandleTypeDef huart3;
 extern volatile uint32_t g_rx_irq_cnt;
 extern volatile uint32_t g_rx_sem_cnt;
 
+extern uint8_t _sbss, _ebss;
+extern uint8_t __lwip_heap_start__, __lwip_heap_end__;
+extern uint8_t ucHeap[];   /* если ругнётся — см. ниже примечание */
+
 static inline uint8_t netif_flags_read_volatile(struct netif *n)
 {
   return *((volatile uint8_t *)&n->flags);
+}
+
+static void DumpMemLayout(void)
+{
+    DebugUART_Print("[MEM] _sbss=0x%08lX _ebss=0x%08lX\r\n",
+                    (uint32_t)&_sbss, (uint32_t)&_ebss);
+    DebugUART_Print("[MEM] lwip_heap: 0x%08lX .. 0x%08lX\r\n",
+                    (uint32_t)&__lwip_heap_start__, (uint32_t)&__lwip_heap_end__);
+    DebugUART_Print("[MEM] LWIP_RAM_HEAP_POINTER=0x%08lX\r\n",
+                    (uint32_t)LWIP_RAM_HEAP_POINTER);
 }
 
 /* Очередь для передачи данных Ethernet -> Core */
@@ -128,6 +142,8 @@ void EthernetTask(void *argument)
   HAL_UART_Transmit(&huart3, (uint8_t*)boot, (uint16_t)strlen(boot), 100);
 
   DebugUART_Print("[ETH] Ethernet task started (DebugUART)\r\n");
+
+  DumpMemLayout();
 
   /* 1) Ждём LINK_UP по событию (если оно есть), иначе fallback polling */
 DebugUART_Print("[ETH] waiting LINK UP (event)... evt=%p mask=0x%08lX\r\n",
