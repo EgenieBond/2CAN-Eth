@@ -1,0 +1,2 @@
+../Core/Src/core_task.c:22:13:CoreTask	144	static
+../Core/Src/core_task.c:50:6:CoreTask_Start	48	static

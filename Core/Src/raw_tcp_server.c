@@ -5,7 +5,7 @@
  */
 
 #include "lwip/tcp.h"
-#include "lwip/inet.h"     // ip4_addr1/2/3/4 (на всякий случай)
+#include "lwip/inet.h"     // ip4_addr1/2/3/4
 #include "debug_uart.h"
 #include <string.h>
 
@@ -38,15 +38,32 @@ static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
   return ERR_OK;
 }
 
+static void tcp_server_error(void *arg, err_t err)
+{
+  LWIP_UNUSED_ARG(arg);
+
+  DebugUART_Print("[TCP] ERROR cb err=%d\r\n", (int)err);
+  client_pcb = NULL;
+  rx_buffer_pos = 0;
+}
+
 static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
                              struct pbuf *p, err_t err)
 {
   LWIP_UNUSED_ARG(arg);
 
+  /* Connection closed by peer */
   if (p == NULL)
   {
     DebugUART_Print("[TCP] Client disconnected (p==NULL)\r\n");
+
+    tcp_arg(tpcb, NULL);
+    tcp_recv(tpcb, NULL);
+    tcp_sent(tpcb, NULL);
+    tcp_err(tpcb, NULL);
+
     tcp_close(tpcb);
+
     client_pcb = NULL;
     rx_buffer_pos = 0;
     return ERR_OK;
@@ -59,10 +76,10 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
     return err;
   }
 
-  /* сообщаем стеку, что данные получены */
+  /* Tell TCP we received data */
   tcp_recved(tpcb, p->tot_len);
 
-  /* обрабатываем цепочку pbuf */
+  /* Process pbuf chain */
   for (struct pbuf *q = p; q != NULL; q = q->next)
   {
     const uint8_t *data = (const uint8_t *)q->payload;
@@ -70,21 +87,32 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
 
     for (uint16_t i = 0; i < len; i++)
     {
+      uint8_t ch = data[i];
+
+      /* Ignore LF to support CRLF from Windows/Python */
+      if (ch == '\n') {
+        continue;
+      }
+
       if (rx_buffer_pos < (RX_BUFFER_SIZE - 1))
       {
-        rx_buffer[rx_buffer_pos++] = (char)data[i];
+        rx_buffer[rx_buffer_pos++] = (char)ch;
 
-        /* команда закончилась по CR */
-        if (data[i] == '\r')
+        /* End of command on CR */
+        if (ch == '\r')
         {
           rx_buffer[rx_buffer_pos] = '\0';
           DebugUART_Print("[TCP] CMD: %s", rx_buffer);
 
-          /* ЭХО (пока) */
+          /* Echo back (for now) */
           err_t wr = tcp_write(tpcb, rx_buffer, (u16_t)rx_buffer_pos, TCP_WRITE_FLAG_COPY);
           if (wr != ERR_OK)
           {
-            DebugUART_Print("[TCP] tcp_write err=%d\r\n", (int)wr);
+            if (wr == ERR_MEM) {
+              DebugUART_Print("[TCP] tcp_write ERR_MEM (sndbuf full)\r\n");
+            } else {
+              DebugUART_Print("[TCP] tcp_write err=%d\r\n", (int)wr);
+            }
           }
           else
           {
@@ -99,7 +127,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
       {
         DebugUART_Print("[TCP] RX overflow -> reset line buffer\r\n");
         rx_buffer_pos = 0;
-        /* выходим из обоих циклов */
+        /* break out of both loops */
         q = NULL;
         break;
       }
@@ -108,15 +136,6 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
 
   pbuf_free(p);
   return ERR_OK;
-}
-
-static void tcp_server_error(void *arg, err_t err)
-{
-  LWIP_UNUSED_ARG(arg);
-
-  DebugUART_Print("[TCP] ERROR cb err=%d\r\n", (int)err);
-  client_pcb = NULL;
-  rx_buffer_pos = 0;
 }
 
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
@@ -139,7 +158,6 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
   client_pcb = newpcb;
   rx_buffer_pos = 0;
 
-  /* SYN дошёл, стэк принял соединение */
   DebugUART_Print("[TCP] SYN->ACCEPT from %d.%d.%d.%d:%u\r\n",
                   ip4_addr1(&newpcb->remote_ip),
                   ip4_addr2(&newpcb->remote_ip),
@@ -153,10 +171,11 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
   tcp_recv(newpcb, tcp_server_recv);
   tcp_err(newpcb, tcp_server_error);
   tcp_sent(newpcb, tcp_server_sent);
-  /* connected callback обычно для active-open, но оставим — иногда удобно */
+
+  /* "connected" is usually for active-open; we call it only for logging */
   tcp_server_connected(NULL, newpcb, ERR_OK);
 
-  /* приветствие */
+  /* Welcome message */
   const char *welcome = "CAN-Ethernet Gateway ready. Use SLCAN commands.\r\n";
   err_t wr = tcp_write(newpcb, welcome, (u16_t)strlen(welcome), TCP_WRITE_FLAG_COPY);
   if (wr == ERR_OK)

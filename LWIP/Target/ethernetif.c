@@ -179,6 +179,9 @@ lan8742_IOCtx_t  LAN8742_IOCtx = {ETH_PHY_IO_Init,
 volatile uint32_t g_rx_irq_cnt = 0;
 volatile uint32_t g_rx_sem_cnt = 0;
 
+volatile uint32_t g_tx_cplt_cnt = 0;
+volatile uint32_t g_tx_err_cnt  = 0;
+
 /* D-Cache line size for Cortex-M7 is 32 bytes */
 #define DCACHE_LINE_SIZE 32U
 
@@ -194,6 +197,19 @@ void invalidate_dcache_range(void *addr, uint32_t size)
   end    = (end + (DCACHE_LINE_SIZE - 1U)) & ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
 
   SCB_InvalidateDCache_by_Addr((uint32_t*)start, (int32_t)(end - start));
+}
+
+static void clean_dcache_range(void *addr, uint32_t size)
+{
+  if (addr == NULL || size == 0U) return;
+
+  uintptr_t start = (uintptr_t)addr;
+  uintptr_t end   = start + (uintptr_t)size;
+
+  start &= ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
+  end    = (end + (DCACHE_LINE_SIZE - 1U)) & ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
+
+  SCB_CleanDCache_by_Addr((uint32_t*)start, (int32_t)(end - start));
 }
 
 /* Копируем первые N байт из pbuf chain в линейный буфер */
@@ -215,7 +231,7 @@ static uint16_t pbuf_copy_head(uint8_t *dst, uint16_t dst_len, const struct pbuf
   return copied;
 }
 
-/* Логируем Ethernet тип + (если IPv4) протокол/источник */
+/* Логируем Ethernet тип + (если IPv4) протокол/источник БЕЗ невыравненных access */
 static void log_rx_pbuf(const struct pbuf *p)
 {
   if (!p) return;
@@ -234,10 +250,8 @@ static void log_rx_pbuf(const struct pbuf *p)
   {
     DebugUART_Print("[RX] ETH ARP tot=%u\r\n", (unsigned)p->tot_len);
 
-    /* ARP: опкод на смещении 20..21 (в Ethernet+ARP) */
-    if (got >= 14 + 8) /* минимально для opcode */
+    if (got >= 14 + 8)
     {
-      /* в ARP header opcode лежит на 6..7 байта ARP, т.е. 14+6/7 */
       uint16_t arp_op = (uint16_t)((head[14+6] << 8) | head[14+7]);
       DebugUART_Print("[RX] ARP op=%u\r\n", (unsigned)arp_op);
     }
@@ -250,13 +264,16 @@ static void log_rx_pbuf(const struct pbuf *p)
 
     if (got >= 14 + 20)
     {
-      const struct ip_hdr *iph = (const struct ip_hdr *)(head + 14);
-      uint8_t proto = IPH_PROTO(iph);
-      /* src IP в ip_hdr хранится как ip4_addr_p_t, но для лога достаточно байт */
-      const uint8_t *src = (const uint8_t *)&iph->src;
+      /* IPv4 header начинается с head[14] */
+      const uint8_t *ip = &head[14];
 
+      /* protocol field offset = 9 */
+      uint8_t proto = ip[9];
+
+      /* source ip offset = 12..15 */
       DebugUART_Print("[RX] IPv4 proto=%u src=%u.%u.%u.%u\r\n",
-                      (unsigned)proto, src[0], src[1], src[2], src[3]);
+                      (unsigned)proto,
+                      (unsigned)ip[12], (unsigned)ip[13], (unsigned)ip[14], (unsigned)ip[15]);
     }
     return;
   }
@@ -287,7 +304,9 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
-  osSemaphoreRelease(TxPktSemaphore);
+	(void)handlerEth;
+	g_tx_cplt_cnt++;
+	osSemaphoreRelease(TxPktSemaphore);
 }
 /**
   * @brief  Ethernet DMA transfer error callback
@@ -296,10 +315,11 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
-  if((HAL_ETH_GetDMAError(handlerEth) & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
-  {
-     osSemaphoreRelease(RxPktSemaphore);
-  }
+	g_tx_err_cnt++;
+	if((HAL_ETH_GetDMAError(handlerEth) & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
+	{
+	   osSemaphoreRelease(RxPktSemaphore);
+	}
 }
 
 /* USER CODE BEGIN 4 */
@@ -341,6 +361,11 @@ static void low_level_init(struct netif *netif)
                       g_MACAddr[3], g_MACAddr[4], g_MACAddr[5]));
 
   hal_eth_init_status = HAL_ETH_Init(&heth);
+
+  /* На всякий случай: если где-то MPU не применился как ожидаем,
+     чистим кэш по таблицам дескрипторов (DMA читает их напрямую). */
+  SCB_CleanDCache_by_Addr((uint32_t*)DMARxDscrTab, sizeof(DMARxDscrTab));
+  SCB_CleanDCache_by_Addr((uint32_t*)DMATxDscrTab, sizeof(DMATxDscrTab));
 
   memset(&TxConfig, 0, sizeof(TxConfig));
   TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -464,64 +489,82 @@ static void low_level_init(struct netif *netif)
 
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
+	#if ETH_PAD_SIZE
+		pbuf_header(p, -ETH_PAD_SIZE);   // remove padding for DMA
+	#endif
+
   uint32_t i = 0U;
   struct pbuf *q = NULL;
   err_t errval = ERR_OK;
-  ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT] = {0};
+  ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT];
 
-  memset(Txbuffer, 0 , ETH_TX_DESC_CNT*sizeof(ETH_BufferTypeDef));
+  LWIP_UNUSED_ARG(netif);
 
-  for(q = p; q != NULL; q = q->next)
+  memset(Txbuffer, 0, sizeof(Txbuffer));
+
+  for (q = p; q != NULL; q = q->next)
   {
-    if(i >= ETH_TX_DESC_CNT)
+    if (i >= ETH_TX_DESC_CNT)
+    {
+      DebugUART_Print("[TX] ERR: too many pbufs in chain (%lu)\r\n", (unsigned long)i);
       return ERR_IF;
-
-    Txbuffer[i].buffer = q->payload;
-    Txbuffer[i].len = q->len;
-
-    if(i>0)
-    {
-      Txbuffer[i-1].next = &Txbuffer[i];
     }
 
-    if(q->next == NULL)
-    {
-      Txbuffer[i].next = NULL;
-    }
+    Txbuffer[i].buffer = (uint8_t*)q->payload;
+    Txbuffer[i].len    = q->len;
+    Txbuffer[i].next   = NULL;
+
+    if (i > 0U)
+      Txbuffer[i - 1U].next = &Txbuffer[i];
 
     i++;
   }
 
-  TxConfig.Length = p->tot_len;
-  TxConfig.TxBuffer = Txbuffer;
-  TxConfig.pData = p;
+  /* Clean DCache for all TX payload segments (aligned inside helper) */
+  for (uint32_t j = 0; j < i; j++)
+  {
+    clean_dcache_range(Txbuffer[j].buffer, Txbuffer[j].len);
+  }
 
+  TxConfig.Length   = p->tot_len;
+  TxConfig.TxBuffer = Txbuffer;
+  TxConfig.pData    = p;
+
+  /* LWIP держит pbuf, пока DMA не закончит */
   pbuf_ref(p);
+
+  //DebugUART_Print("[TX] tot=%u segs=%lu\r\n", (unsigned)p->tot_len, (unsigned long)i);
 
   do
   {
-    if(HAL_ETH_Transmit_IT(&heth, &TxConfig) == HAL_OK)
+    if (HAL_ETH_Transmit_IT(&heth, &TxConfig) == HAL_OK)
     {
       errval = ERR_OK;
     }
     else
     {
-
-      if(HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY)
+      if (HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY)
       {
-        /* Wait for descriptors to become available */
+        /* Ждём освобождения дескрипторов */
         osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT);
         HAL_ETH_ReleaseTxPacket(&heth);
         errval = ERR_BUF;
       }
       else
       {
-        /* Other error */
-        pbuf_free(p);
-        errval =  ERR_IF;
+        /* Фатальная ошибка TX */
+        DebugUART_Print("[TX] HAL_ETH_Transmit_IT ERROR=0x%08lX\r\n",
+                        (unsigned long)HAL_ETH_GetError(&heth));
+
+        pbuf_free(p); /* симметрично pbuf_ref */
+        errval = ERR_IF;
       }
     }
-  }while(errval == ERR_BUF);
+  } while (errval == ERR_BUF);
+
+	#if ETH_PAD_SIZE
+  	  	  pbuf_header(p, ETH_PAD_SIZE);    // restore for lwIP
+	#endif
 
   return errval;
 }
@@ -985,12 +1028,10 @@ void HAL_ETH_RxAllocateCallback(uint8_t **buff)
   if (p)
   {
     /* Get the buff from the struct pbuf address. */
-    *buff = (uint8_t *)p + offsetof(RxBuff_t, buff);
-    p->custom_free_function = pbuf_free_custom;
-    /* Initialize the struct pbuf.
-    * This must be performed whenever a buffer's allocated because it may be
-    * changed by lwIP or the app, e.g., pbuf_free decrements ref. */
-    pbuf_alloced_custom(PBUF_RAW, 0, PBUF_REF, p, *buff, ETH_RX_BUFFER_SIZE);
+	  uint8_t *base = (uint8_t *)p + offsetof(RxBuff_t, buff);
+	  *buff = base + ETH_PAD_SIZE;                 // <-- pad before Ethernet header
+	  p->custom_free_function = pbuf_free_custom;
+	  pbuf_alloced_custom(PBUF_RAW, 0, PBUF_REF, p, *buff, ETH_RX_BUFFER_SIZE);
   }
   else
   {

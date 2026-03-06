@@ -1,0 +1,2 @@
+../Core/Src/fake_client_source.c:26:6:FakeClientSource_Init	8	static
+../Core/Src/fake_client_source.c:33:6:FakeClientSource_Poll	16	static

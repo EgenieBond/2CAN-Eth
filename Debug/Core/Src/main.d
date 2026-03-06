@@ -77,7 +77,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Middlewares/Third_Party/LwIP/system/arch/sys_arch.h \
  ../LWIP/Target/ethernetif.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h \
- ../Core/Inc/ethernet_task.h ../Core/Inc/debug_uart.h
+ ../Core/Inc/ethernet_task.h ../Core/Inc/debug_uart.h \
+ ../Core/Inc/eth_app.h ../Core/Inc/core_task.h
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -159,3 +160,5 @@ C:/Users/Egenie/STM32CubeIDE/Repository/STM32Cube_FW_H7_V1.12.0/Middlewares/Thir
 ../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h:
 ../Core/Inc/ethernet_task.h:
 ../Core/Inc/debug_uart.h:
+../Core/Inc/eth_app.h:
+../Core/Inc/core_task.h:

@@ -118,6 +118,9 @@ extern uint8_t __lwip_heap_end__;
 /*-----------------------------------------------------------------------------*/
  /* USER CODE BEGIN 1 */
 
+ /* Alignment padding for Ethernet frames (recommended on Cortex-M7) */
+ #define ETH_PAD_SIZE 2
+
  /* ===== Static IPv4 (у тебя уже есть) ===== */
  #define IP_ADDR0   10
  #define IP_ADDR1   0

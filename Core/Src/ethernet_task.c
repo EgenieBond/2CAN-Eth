@@ -18,6 +18,8 @@
 #include "lwip/etharp.h"
 #include "lwip/tcpip.h"
 
+#include "app_queues.h"
+
 #ifndef PHY_ADDR
 #define PHY_ADDR 0U   // LAN8742 обычно на адресе 0
 #endif
@@ -52,9 +54,6 @@ static void DumpMemLayout(void)
     DebugUART_Print("[MEM] LWIP_RAM_HEAP_POINTER=0x%08lX\r\n",
                     (uint32_t)LWIP_RAM_HEAP_POINTER);
 }
-
-/* Очередь для передачи данных Ethernet -> Core */
-osMessageQueueId_t eth_to_core_queue = NULL;
 
 static void PHY_Dump(void)
 {
@@ -181,8 +180,8 @@ else
   DebugUART_Print("[ETH] LINK UP (task sees it)\r\n");
 
   /* 2) Теперь PHY дамп корректен */
-  PHY_Dump();
-  PHY_Scan();
+  //PHY_Dump();
+  //PHY_Scan();
 
   /* 3) IP */
   DebugUART_Print("[ETH] My IP: %d.%d.%d.%d\r\n",
@@ -197,20 +196,12 @@ else
     osDelay(100);
   }
 
-  /* 4) Стартуем RAW TCP сервер в tcpip_thread */
-  DebugUART_Print("[ETH] starting RAW TCP server via tcpip_callback...\r\n");
-  err_t e = tcpip_callback(tcp_server_init_cb, NULL);
-  DebugUART_Print("[ETH] tcpip_callback returned %d\r\n", (int)e);
-
-  DebugUART_Print("[ETH] try: connect %d.%d.%d.%d:2001\r\n",
-                  ip4_addr1(netif_ip4_addr(&gnetif)),
-                  ip4_addr2(netif_ip4_addr(&gnetif)),
-                  ip4_addr3(netif_ip4_addr(&gnetif)),
-                  ip4_addr4(netif_ip4_addr(&gnetif)));
+  /* 4) TEMP: пока проверяем fake-client pipeline, TCP server не стартуем */
+  DebugUART_Print("[ETH] TEMP: RAW TCP server start is disabled\r\n");
 
   for (;;)
   {
-    osDelay(2000);
+    osDelay(10000);
 
     DebugUART_Print("[ETH] heartbeat: link=%d up=%d flags=0x%02X\r\n",
                     netif_is_link_up(&gnetif) ? 1 : 0,
@@ -218,12 +209,6 @@ else
                     (unsigned)gnetif.flags);
 
     static uint32_t last_irq = 0, last_sem = 0;
-
-    DebugUART_Print("[RX] irq=%lu (+%lu) sem=%lu (+%lu)\r\n",
-                    (unsigned long)g_rx_irq_cnt,
-                    (unsigned long)(g_rx_irq_cnt - last_irq),
-                    (unsigned long)g_rx_sem_cnt,
-                    (unsigned long)(g_rx_sem_cnt - last_sem));
 
     last_irq = g_rx_irq_cnt;
     last_sem = g_rx_sem_cnt;
