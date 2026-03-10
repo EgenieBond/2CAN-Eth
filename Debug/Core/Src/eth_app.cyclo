@@ -1,0 +1,2 @@
+../Core/Src/eth_app.c:22:6:AppQueues_Init	3
+../Core/Src/eth_app.c:44:6:EthApp_Init	1

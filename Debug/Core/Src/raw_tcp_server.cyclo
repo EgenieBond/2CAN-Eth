@@ -1,4 +1,6 @@
-../Core/Src/raw_tcp_server.c:20:14:tcp_server_recv	8
-../Core/Src/raw_tcp_server.c:88:13:tcp_server_error	1
-../Core/Src/raw_tcp_server.c:95:14:tcp_server_accept	4
-../Core/Src/raw_tcp_server.c:137:6:RawTcpServer_Init	5
+../Core/Src/raw_tcp_server.c:23:14:tcp_server_connected	1
+../Core/Src/raw_tcp_server.c:32:14:tcp_server_sent	1
+../Core/Src/raw_tcp_server.c:41:13:tcp_server_error	1
+../Core/Src/raw_tcp_server.c:50:14:tcp_server_recv	10
+../Core/Src/raw_tcp_server.c:141:14:tcp_server_accept	5
+../Core/Src/raw_tcp_server.c:195:6:RawTcpServer_Init	5

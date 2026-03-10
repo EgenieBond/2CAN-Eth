@@ -78,7 +78,8 @@ Core/Src/ethernet_task.o: ../Core/Src/ethernet_task.c \
  ../Middlewares/Third_Party/LwIP/system/arch/sys_arch.h \
  ../LWIP/Target/ethernetif.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h \
- ../Core/Inc/debug_uart.h ../Core/Inc/raw_tcp_server.h
+ ../Core/Inc/debug_uart.h ../Core/Inc/raw_tcp_server.h \
+ ../Core/Inc/app_queues.h ../Core/Inc/eth_events.h
 ../Core/Inc/ethernet_task.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h:
@@ -161,3 +162,5 @@ C:/Users/Egenie/STM32CubeIDE/Repository/STM32Cube_FW_H7_V1.12.0/Middlewares/Thir
 ../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h:
 ../Core/Inc/debug_uart.h:
 ../Core/Inc/raw_tcp_server.h:
+../Core/Inc/app_queues.h:
+../Core/Inc/eth_events.h:

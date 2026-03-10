@@ -46,6 +46,7 @@
 /* USER CODE BEGIN Includes */
 /* Section where include file can be added */
 #define configCHECK_FOR_STACK_OVERFLOW 2
+#define configUSE_MALLOC_FAILED_HOOK   1
 /* Включаем внешний heap, который мы сами объявим с правильным выравниванием */
 #define configAPPLICATION_ALLOCATED_HEAP 1
 /* USER CODE END Includes */
