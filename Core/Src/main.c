@@ -44,7 +44,7 @@ UART_HandleTypeDef huart3;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 4096,
+  .stack_size = 8192,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
@@ -333,8 +333,8 @@ void StartDefaultTask(void *argument)
   DebugUART_Print("[HEAP] min ever free:      %lu\r\n", (uint32_t)xPortGetMinimumEverFreeHeapSize());
   DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
-  EthApp_Init();
-  CoreTask_Start();
+  //EthApp_Init();
+  //CoreTask_Start();
 
   /* start EthernetTask */
   EthernetTask_Start();

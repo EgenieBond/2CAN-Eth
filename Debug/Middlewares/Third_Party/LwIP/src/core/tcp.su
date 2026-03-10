@@ -19,7 +19,7 @@
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:968:1:tcp_recved	24	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1011:1:tcp_new_port	16	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1067:1:tcp_connect	48	static
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:1192:1:tcp_slowtmr	88	static
+../Middlewares/Third_Party/LwIP/src/core/tcp.c:1192:1:tcp_slowtmr	80	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1479:1:tcp_fasttmr	16	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1526:1:tcp_txnow	16	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:1539:1:tcp_process_refused_data	32	static
@@ -50,8 +50,3 @@
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2354:1:tcp_debug_state_str	16	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2360:1:tcp_tcp_get_tcp_addrinfo	24	static
 ../Middlewares/Third_Party/LwIP/src/core/tcp.c:2386:1:tcp_free_ooseq	16	static
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2405:1:tcp_debug_print	64	static
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2441:1:tcp_debug_print_state	16	static
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2452:1:tcp_debug_print_flags	16	static
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2485:1:tcp_debug_print_pcbs	24	static
-../Middlewares/Third_Party/LwIP/src/core/tcp.c:2517:1:tcp_pcbs_sane	16	static

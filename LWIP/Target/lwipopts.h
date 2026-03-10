@@ -76,7 +76,7 @@ extern uint8_t __lwip_heap_end__;
 /*----- Value in opt.h for LWIP_NETIF_LINK_CALLBACK: 0 -----*/
 #define LWIP_NETIF_LINK_CALLBACK 1
 /*----- Value in opt.h for TCPIP_THREAD_STACKSIZE: 0 -----*/
-#define TCPIP_THREAD_STACKSIZE 2048
+#define TCPIP_THREAD_STACKSIZE 4096
 /*----- Value in opt.h for TCPIP_THREAD_PRIO: 1 -----*/
 #define TCPIP_THREAD_PRIO 24
 /*----- Value in opt.h for TCPIP_MBOX_SIZE: 0 -----*/
@@ -86,7 +86,7 @@ extern uint8_t __lwip_heap_end__;
 /*----- Value in opt.h for SLIPIF_THREAD_PRIO: 1 -----*/
 #define SLIPIF_THREAD_PRIO 3
 /*----- Value in opt.h for DEFAULT_THREAD_STACKSIZE: 0 -----*/
-#define DEFAULT_THREAD_STACKSIZE 2048
+#define DEFAULT_THREAD_STACKSIZE 4096
 /*----- Value in opt.h for DEFAULT_THREAD_PRIO: 1 -----*/
 #define DEFAULT_THREAD_PRIO 3
 /*----- Value in opt.h for DEFAULT_UDP_RECVMBOX_SIZE: 0 -----*/
@@ -155,13 +155,15 @@ extern uint8_t __lwip_heap_end__;
  #define TCP_WND                 (4 * TCP_MSS)
 
  /* ===== lwIP debug to track SYN/ACK/ARP ===== */
- #define LWIP_DEBUG 1
+ #define LWIP_DEBUG 0
  #define LWIP_DBG_TYPES_ON (LWIP_DBG_ON | LWIP_DBG_LEVEL_ALL)
 
+ /*
  #define TCP_DEBUG  LWIP_DBG_ON
  #define IP_DEBUG   LWIP_DBG_ON
  #define ETHARP_DEBUG LWIP_DBG_ON
  #define NETIF_DEBUG LWIP_DBG_ON
+ */
 
  /* --- Debug output redirection (no redefinition warnings) --- */
  #ifndef LWIP_PLATFORM_DIAG

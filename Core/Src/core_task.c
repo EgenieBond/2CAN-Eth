@@ -51,7 +51,7 @@ void CoreTask_Start(void)
 {
     const osThreadAttr_t attr = {
         .name = "CoreTask",
-        .stack_size = 4096,
+        .stack_size = 8192,
         .priority = (osPriority_t)osPriorityNormal
     };
 
