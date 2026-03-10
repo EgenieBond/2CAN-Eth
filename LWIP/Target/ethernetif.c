@@ -262,19 +262,20 @@ static void log_rx_pbuf(const struct pbuf *p)
     return;
   }
 
+  /*
   if (eth_type == ETHTYPE_IP)
   {
     DebugUART_Print("[RX] ETH IPv4 tot=%u\r\n", (unsigned)p->tot_len);
 
     if (got >= 14 + 20)
     {
-      /* IPv4 header начинается с head[14] */
+      // IPv4 header начинается с head[14]
       const uint8_t *ip = &head[14];
 
-      /* protocol field offset = 9 */
+      // protocol field offset = 9
       uint8_t proto = ip[9];
 
-      /* source ip offset = 12..15 */
+      // source ip offset = 12..15
       DebugUART_Print("[RX] IPv4 proto=%u src=%u.%u.%u.%u\r\n",
                       (unsigned)proto,
                       (unsigned)ip[12], (unsigned)ip[13], (unsigned)ip[14], (unsigned)ip[15]);
@@ -282,7 +283,9 @@ static void log_rx_pbuf(const struct pbuf *p)
     return;
   }
 
-  DebugUART_Print("[RX] ETH type=0x%04X tot=%u\r\n", (unsigned)eth_type, (unsigned)p->tot_len);
+  */
+
+  //DebugUART_Print("[RX] ETH type=0x%04X tot=%u\r\n", (unsigned)eth_type, (unsigned)p->tot_len);
 }
 /* USER CODE END 3 */
 
@@ -590,7 +593,7 @@ static struct pbuf * low_level_input(struct netif *netif)
     if (p != NULL)
     {
       /* Логируем факт RX (ARP/IP/прочее) */
-      log_rx_pbuf(p);
+      // log_rx_pbuf(p);
     }
   }
   return p;
@@ -988,6 +991,7 @@ void ethernet_link_thread(void* argument)
 void HAL_ETH_RxAllocateCallback(uint8_t **buff)
 {
   struct pbuf_custom *p = LWIP_MEMPOOL_ALLOC(RX_POOL);
+  static uint32_t dbg_alloc_cnt = 0;  //просто счетчик для вывода
 
   if (p)
   {
@@ -996,11 +1000,17 @@ void HAL_ETH_RxAllocateCallback(uint8_t **buff)
     /* DMA пишет кадр с отступом 2 байта, чтобы lwIP потом работал с выровненным payload */
     *buff = base + ETH_PAD_SIZE;
 
-    DebugUART_Print("[RXALLOC] p=%p base=%p buff=%p off=%lu\r\n",
-                    (void*)p,
-                    (void*)base,
-                    (void*)*buff,
-                    (unsigned long)offsetof(RxBuff_t, buff));
+    /*
+
+    if (dbg_alloc_cnt < 8)
+    {
+          DebugUART_Print("[RXALLOC] p=%p buff=%p off=%lu\r\n",
+                          (void*)p,
+                          (void*)*buff,
+                          (unsigned long)offsetof(RxBuff_t, buff));
+          dbg_alloc_cnt++;
+     }
+    */
 
     p->custom_free_function = pbuf_free_custom;
     pbuf_alloced_custom(PBUF_RAW, 0, PBUF_REF, p, *buff, ETH_RX_BUFFER_SIZE);

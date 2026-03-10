@@ -202,11 +202,13 @@ else
   for (;;)
   {
     osDelay(10000);
+    /*
 
     DebugUART_Print("[ETH] heartbeat: link=%d up=%d flags=0x%02X\r\n",
                     netif_is_link_up(&gnetif) ? 1 : 0,
                     netif_is_up(&gnetif) ? 1 : 0,
                     (unsigned)gnetif.flags);
+    */
 
     static uint32_t last_irq = 0, last_sem = 0;
 

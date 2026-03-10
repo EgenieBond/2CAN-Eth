@@ -3,4 +3,4 @@
 ../Core/Src/ethernet_task.c:108:13:PHY_Scan	56	static
 ../Core/Src/ethernet_task.c:127:13:tcp_server_init_cb	16	static
 ../Core/Src/ethernet_task.c:136:6:EthernetTask	32	static
-../Core/Src/ethernet_task.c:221:6:EthernetTask_Start	48	static
+../Core/Src/ethernet_task.c:223:6:EthernetTask_Start	48	static

@@ -1,5 +1,5 @@
-../Core/Src/client_handler.c:25:13:ClientHandler_SendCmdToCore	80	static
-../Core/Src/client_handler.c:43:6:ClientHandler_InputBytes	24	static
-../Core/Src/client_handler.c:69:6:ClientHandler_PollTx	72	static
-../Core/Src/client_handler.c:84:13:ClientHandlerTask	16	static
-../Core/Src/client_handler.c:104:6:ClientHandlerTask_Start	48	static
+../Core/Src/client_handler.c:25:13:ClientHandler_SendCmdToCore	88	static
+../Core/Src/client_handler.c:56:6:ClientHandler_InputBytes	32	static
+../Core/Src/client_handler.c:99:6:ClientHandler_PollTx	80	static
+../Core/Src/client_handler.c:125:13:ClientHandlerTask	24	static
+../Core/Src/client_handler.c:154:6:ClientHandlerTask_Start	48	static

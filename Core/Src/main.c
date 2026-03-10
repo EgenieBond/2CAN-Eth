@@ -333,8 +333,9 @@ void StartDefaultTask(void *argument)
   DebugUART_Print("[HEAP] min ever free:      %lu\r\n", (uint32_t)xPortGetMinimumEverFreeHeapSize());
   DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
-  //EthApp_Init();
-  //CoreTask_Start();
+  /* ВКЛЮЧАЕМ внутренний pipeline */
+  EthApp_Init();
+  CoreTask_Start();
 
   /* start EthernetTask */
   EthernetTask_Start();

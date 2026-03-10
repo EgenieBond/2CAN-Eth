@@ -26,14 +26,39 @@ static void CoreTask(void *argument)
     eth_resp_msg_t resp;
 
     DebugUART_Print("[CORE] CoreTask started\r\n");
+    DebugUART_Print("[CORE] eth_to_core_queue=%p core_to_eth_queue=%p\r\n",
+                    (void*)eth_to_core_queue,
+                    (void*)core_to_eth_queue);
 
     for (;;)
     {
-        if (osMessageQueueGet(eth_to_core_queue, &cmd, NULL, osWaitForever) == osOK)
+        //DebugUART_Print("[CORE] waiting for cmd...\r\n");
+
+        osStatus_t st = osMessageQueueGet(eth_to_core_queue, &cmd, NULL, 1000);
+
+        //DebugUART_Print("[CORE] osMessageQueueGet -> %d\r\n", (int)st);
+
+        if (st == osOK)
         {
+            DebugUART_Print("[CORE] got cmd raw: ");
+            for (size_t i = 0; i < strlen(cmd.data); i++)
+            {
+                DebugUART_Print("%02X ", (unsigned char)cmd.data[i]);
+            }
+            DebugUART_Print("\r\n");
+
             memset(&resp, 0, sizeof(resp));
 
             Slcan_ProcessCommand(cmd.data, resp.data, sizeof(resp.data));
+
+            DebugUART_Print("[CORE] resp str: %s\r\n", resp.data);
+
+            DebugUART_Print("[CORE] resp raw: ");
+            for (size_t i = 0; i < strlen(resp.data); i++)
+            {
+                DebugUART_Print("%02X ", (unsigned char)resp.data[i]);
+            }
+            DebugUART_Print("\r\n");
 
             if (osMessageQueuePut(core_to_eth_queue, &resp, 0, 0) != osOK)
             {
@@ -41,7 +66,7 @@ static void CoreTask(void *argument)
             }
             else
             {
-                DebugUART_Print("[CORE] processed: %s", cmd.data);
+                DebugUART_Print("[CORE] processed OK\r\n");
             }
         }
     }

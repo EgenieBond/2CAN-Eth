@@ -3,5 +3,5 @@
 ../Core/Src/main.c:228:13:MX_USART3_UART_Init	5
 ../Core/Src/main.c:278:13:MX_GPIO_Init	1
 ../Core/Src/main.c:322:6:StartDefaultTask	1
-../Core/Src/main.c:354:6:MPU_Config	5
-../Core/Src/main.c:416:6:Error_Handler	1
+../Core/Src/main.c:355:6:MPU_Config	5
+../Core/Src/main.c:417:6:Error_Handler	1
