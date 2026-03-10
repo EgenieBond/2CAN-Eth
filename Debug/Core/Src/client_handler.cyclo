@@ -1,0 +1,5 @@
+../Core/Src/client_handler.c:25:13:ClientHandler_SendCmdToCore	2
+../Core/Src/client_handler.c:43:6:ClientHandler_InputBytes	4
+../Core/Src/client_handler.c:69:6:ClientHandler_PollTx	2
+../Core/Src/client_handler.c:84:13:ClientHandlerTask	1
+../Core/Src/client_handler.c:104:6:ClientHandlerTask_Start	2

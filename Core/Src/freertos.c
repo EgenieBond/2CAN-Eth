@@ -66,5 +66,14 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 /* FreeRTOS heap: обязательно 8-byte alignment для CM7 */
 __attribute__((aligned(8))) uint8_t ucHeap[ configTOTAL_HEAP_SIZE ];
 
+void vApplicationMallocFailedHook(void)
+{
+  DebugUART_Print("\r\n[RTOS] MALLOC FAILED\r\n");
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
 /* USER CODE END Application */
 
