@@ -18,11 +18,15 @@
 
 osMessageQueueId_t eth_to_core_queue = NULL;
 osMessageQueueId_t core_to_eth_queue = NULL;
+osMessageQueueId_t core_to_can_queue = NULL;
+osMessageQueueId_t can_to_core_queue = NULL;
 
 void AppQueues_Init(void)
 {
     eth_to_core_queue = osMessageQueueNew(8, sizeof(eth_cmd_msg_t), NULL);
     core_to_eth_queue = osMessageQueueNew(8, sizeof(eth_resp_msg_t), NULL);
+    core_to_can_queue = osMessageQueueNew(8, sizeof(can_msg_t), NULL);
+    can_to_core_queue = osMessageQueueNew(8, sizeof(can_msg_t), NULL);
 
     DebugUART_Print("[APP] eth_to_core_queue=%p item=%lu\r\n",
                     (void*)eth_to_core_queue,
@@ -32,7 +36,16 @@ void AppQueues_Init(void)
                     (void*)core_to_eth_queue,
                     (unsigned long)sizeof(eth_resp_msg_t));
 
-    if (!eth_to_core_queue || !core_to_eth_queue)
+    DebugUART_Print("[APP] core_to_can_queue=%p item=%lu\r\n",
+                    (void*)core_to_can_queue,
+                    (unsigned long)sizeof(can_msg_t));
+
+    DebugUART_Print("[APP] can_to_core_queue=%p item=%lu\r\n",
+                    (void*)can_to_core_queue,
+                    (unsigned long)sizeof(can_msg_t));
+
+    if (!eth_to_core_queue || !core_to_eth_queue ||
+        !core_to_can_queue || !can_to_core_queue)
     {
         DebugUART_Print("[APP] ERROR: queue creation failed\r\n");
         while (1) { }

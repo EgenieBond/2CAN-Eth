@@ -11,7 +11,8 @@ Core/Src/eth_app.o: ../Core/Src/eth_app.c ../Core/Inc/eth_app.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h \
- ../Core/Inc/client_handler.h ../Core/Inc/debug_uart.h
+ ../Core/Inc/can_types.h ../Core/Inc/client_handler.h \
+ ../Core/Inc/debug_uart.h
 ../Core/Inc/eth_app.h:
 ../Core/Inc/app_queues.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h:
@@ -25,5 +26,6 @@ C:/Users/Egenie/STM32CubeIDE/Repository/STM32Cube_FW_H7_V1.12.0/Middlewares/Thir
 ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h:
+../Core/Inc/can_types.h:
 ../Core/Inc/client_handler.h:
 ../Core/Inc/debug_uart.h:

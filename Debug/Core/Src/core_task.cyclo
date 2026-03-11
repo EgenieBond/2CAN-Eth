@@ -1,2 +1,5 @@
-../Core/Src/core_task.c:22:13:CoreTask	5
-../Core/Src/core_task.c:75:6:CoreTask_Start	2
+../Core/Src/core_task.c:45:13:CoreTask_HandleEthCommand	20
+../Core/Src/core_task.c:210:20:CoreTask_CmdTypeToStr	7
+../Core/Src/core_task.c:224:13:CoreTask_HandleCanRx	5
+../Core/Src/core_task.c:270:13:CoreTask	3
+../Core/Src/core_task.c:301:6:CoreTask_Start	2

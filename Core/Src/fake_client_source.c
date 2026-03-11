@@ -14,10 +14,16 @@
 
 static const char *test_cmds[] =
 {
-    "O\r",
     "S8\r",
-    "T12341122\r",
-    "C\r"
+    "O\r",
+    "t12321122\r",
+    "t12\r",
+    "t123Z122\r",
+    "r1239\r",
+    "C\r",
+    "t12321122\r",
+    "L\r",
+    "t12321122\r"
 };
 
 static volatile uint32_t cmd_index = 0;

@@ -1,1 +1,9 @@
-../Core/Src/slcan_parser.c:12:6:Slcan_ProcessCommand	24	static
+../Core/Src/slcan_parser.c:12:12:Slcan_IsValidBitrateCode	16	static
+../Core/Src/slcan_parser.c:17:12:Slcan_HexCharToNibble	16	static
+../Core/Src/slcan_parser.c:43:12:Slcan_ParseHexByte	24	static
+../Core/Src/slcan_parser.c:60:12:Slcan_ParseHexUint32	40	static
+../Core/Src/slcan_parser.c:80:12:Slcan_ParseDlcChar	24	static
+../Core/Src/slcan_parser.c:97:12:Slcan_ParseStandardFrame	48	static
+../Core/Src/slcan_parser.c:160:12:Slcan_ParseExtendedFrame	48	static
+../Core/Src/slcan_parser.c:220:5:Slcan_ParseCommand	16	static
+../Core/Src/slcan_parser.c:300:5:Slcan_FormatFrame	56	static

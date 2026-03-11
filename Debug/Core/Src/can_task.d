@@ -1,4 +1,4 @@
-Core/Src/core_task.o: ../Core/Src/core_task.c ../Core/Inc/core_task.h \
+Core/Src/can_task.o: ../Core/Src/can_task.c ../Core/Inc/can_task.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h \
  ../Core/Inc/FreeRTOSConfig.h \
@@ -11,9 +11,8 @@ Core/Src/core_task.o: ../Core/Src/core_task.c ../Core/Inc/core_task.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h \
  ../Core/Inc/app_queues.h ../Core/Inc/can_types.h \
- ../Core/Inc/slcan_parser.h ../Core/Inc/slcan_types.h \
- ../Core/Inc/slcan_types.h ../Core/Inc/debug_uart.h
-../Core/Inc/core_task.h:
+ ../Core/Inc/debug_uart.h ../Core/Inc/can_types.h
+../Core/Inc/can_task.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h:
 ../Core/Inc/FreeRTOSConfig.h:
@@ -27,7 +26,5 @@ C:/Users/Egenie/STM32CubeIDE/Repository/STM32Cube_FW_H7_V1.12.0/Middlewares/Thir
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h:
 ../Core/Inc/app_queues.h:
 ../Core/Inc/can_types.h:
-../Core/Inc/slcan_parser.h:
-../Core/Inc/slcan_types.h:
-../Core/Inc/slcan_types.h:
 ../Core/Inc/debug_uart.h:
+../Core/Inc/can_types.h:

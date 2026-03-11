@@ -1,0 +1,8 @@
+../Core/Src/can_task.c:37:20:CanTask_IdTypeToStr	2
+../Core/Src/can_task.c:42:20:CanTask_FrameTypeToStr	2
+../Core/Src/can_task.c:47:12:CanTask_BuildTxHeader	7
+../Core/Src/can_task.c:84:13:CanTask_PrintInputFrame	4
+../Core/Src/can_task.c:111:13:CanTask_PrintTxHeader	2
+../Core/Src/can_task.c:123:13:CanTask_DebugLoopbackToCore	3
+../Core/Src/can_task.c:147:13:CanTask	5
+../Core/Src/can_task.c:194:6:CanTask_Start	2

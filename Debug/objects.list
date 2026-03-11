@@ -1,3 +1,4 @@
+"./Core/Src/can_task.o"
 "./Core/Src/client_handler.o"
 "./Core/Src/core_task.o"
 "./Core/Src/debug_uart.o"
