@@ -44,7 +44,27 @@ ClientHandler его читает и “отправляет клиенту”
 - Сейчас ClientHandlerTask получает поток байтов из FakeClientSource_Poll(). А в финальной архитектуре он должен получать байты из TCP receive callback / TCP input logic
 - Сейчас исходящие ответы уходят только в лог [CLIENT] TX->FAKE_CLIENT:, а не реальному клиенту
 
-## Вывод всего лога через UART:
+## Про модуль ядра
+- Уже работает такая цепочка:
+FakeClient -> ClientHandler -> eth_to_core_queue -> CoreTask -> Slcan_ParseCommand -> core_to_can_queue -> CanTask(debug)
+
+- валидные команды проходят правильно, невалидные команды отбрасываются правильно
+1. Успешные:
+S8\r → скорость установлена
+O\r → канал открыт
+t12321122\r → кадр распарсен, поставлен в core_to_can_queue, считан CanTask
+L\r → listen-only включается
+C\r → канал закрывается
+
+2. Ошибочные:
+t12\r → ошибка парсинга
+t123Z122\r → ошибка парсинга
+r1239\r → ошибка парсинга из-за DLC > 8
+отправка кадра при закрытом канале → ошибка
+отправка кадра в listen-only → ошибка
+
+
+## Вывод текущего лога через UART:
 === USART3 INIT OK (PD8/PD9) ===
 [BOOT] after UART init
 [RESET] RCC->RSR=0x00420000
@@ -58,7 +78,7 @@ Starting FreeRTOS...
 [ETH] ethernetif.c BUILD TAG: AAA_1
 [ETH] Initializing Ethernet hardware...
 [ETH] MAC: 00:80:E1:00:00:00
-[EVT] g_ethLinkEvt created = 0x240034e0
+[EVT] g_ethLinkEvt created = 0x24003508
 [EVT] mask APP_ETH_EVT_LINK_UP=0x00000001
 [ETH] initial PHY link DOWN
 [LWIP] Ethernet link thread created
@@ -66,23 +86,27 @@ Starting FreeRTOS...
 [HEAP] free after LWIP init: 45968
 [HEAP] min ever free:      45968
 [LWIP] MX_LWIP_Init done
-[APP] eth_to_core_queue=0x24004de8 item=64
-[APP] core_to_eth_queue=0x24005040 item=64
+[APP] eth_to_core_queue=0x24004e10 item=64
+[APP] core_to_eth_queue=0x24005068 item=64
+[APP] core_to_can_queue=0x240052c0 item=16
+[APP] can_to_core_queue=0x24005398 item=16
 [APP] Queues created OK
 [CLIENT] task created
 [APP] EthApp_Init done
+[CORE] task created
+[CAN] task created
+[CORE] CoreTask started
+[ETH] Ethernet task started (DebugUART)
+[MEM] _sbss=0x240000C8 _ebss=0x24018294
+[MEM] lwip_heap: 0x240182A0 .. 0x240282A0
+[MEM] LWIP_RAM_HEAP_POINTER=0x240182A0
+[ETH] waiting LINK UP (event)... evt=0x24003508 mask=0x00000001
+[CORE] eth_to_core_queue=0x24004e10 core_to_eth_queue=0x24005068
+[CORE] core_to_can_queue=0x240052c0 can_to_core_queue=0x24005398
+[CAN] CanTask started
+[CAN] core_to_can_queue=0x240052c0 can_to_core_queue=0x24005398
 [CLIENT] ClientHandlerTask started
 [FAKE] Fake client source init
-[CORE] CoreTask started
-[CORE] eth_to_core_queue=0x24004de8 core_to_eth_queue=0x24005040
-[CORE] task created
-
-[ETH] EthernetTask ENTER (HAL_UART_Transmit)
-[ETH] Ethernet task started (DebugUART)
-[MEM] _sbss=0x240000A8 _ebss=0x2401826C
-[MEM] lwip_heap: 0x24018280 .. 0x24028280
-[MEM] LWIP_RAM_HEAP_POINTER=0x24018280
-[ETH] waiting LINK UP (event)... evt=0x240034e0 mask=0x00000001
 [ETH] EthernetTask thread created
 [LWIP] netif is UP
 [LWIP] link is UP
@@ -91,51 +115,147 @@ Starting FreeRTOS...
 [ETH] LINK UP (task sees it)
 [ETH] My IP: 10.0.0.100
 [ETH] TEMP: RAW TCP server start is disabled
+[CLIENT] complete line: 53 38 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 53 38 0D
+[CLIENT] osMessageQueuePut -> 0
+[CORE] got cmd raw: 53 38 0D
+[CORE] parse OK, type=SET_BITRATE
+[CORE] parsed bitrate: S8
+[CORE] bitrate set: S8
+[CORE] resp str:
+[CORE] resp raw: 0D
+[CLIENT] -> CORE OK
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 0D
+[CLIENT] TX->FAKE_CLIENT:
+[CORE] processed OK
 [CLIENT] complete line: 4F 0D
-[CLIENT] eth_to_core_queue=0x24004de8
+[CLIENT] eth_to_core_queue=0x24004e10
 [CLIENT] SendCmdToCore raw bytes: 4F 0D
 [CLIENT] osMessageQueuePut -> 0
 [CLIENT] -> CORE OK
 [CORE] got cmd raw: 4F 0D
+[CORE] parse OK, type=OPEN
+[CORE] channel OPEN, bitrate=S8
 [CORE] resp str:
 [CORE] resp raw: 0D
 [CORE] processed OK
 [CLIENT] got resp from CORE:
 [CLIENT] resp raw: 0D
 [CLIENT] TX->FAKE_CLIENT:
-[CLIENT] complete line: 53 38 0D
-[CLIENT] eth_to_core_queue=0x24004de8
-[CLIENT] SendCmdToCore raw bytes: 53 38 0D
+[CLIENT] complete line: 74 31 32 33 32 31 31 32 32 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 74 31 32 33 32 31 31 32 32 0D
 [CLIENT] osMessageQueuePut -> 0
 [CLIENT] -> CORE OK
-[CORE] got cmd raw: 53 38 0D
+[CORE] got cmd raw: 74 31 32 33 32 31 31 32 32 0D
+[CORE] parse OK, type=SEND_FRAME
+[CORE] parsed frame: ID=0x00000123 DLC=2 FLAGS=0x00 DATA=11 22
+[CORE] frame queued to CAN
+[CORE] frame: ID=0x00000123 DLC=2 FLAGS=0x00
 [CORE] resp str:
 [CORE] resp raw: 0D
 [CORE] processed OK
+[CAN] RX from CORE: DATA frame ID=0x00000123 DLC=2 FLAGS=0x00 DATA=11 22
+[CAN] TEMP: frame consumed by debug CanTask
 [CLIENT] got resp from CORE:
 [CLIENT] resp raw: 0D
 [CLIENT] TX->FAKE_CLIENT:
-[CLIENT] complete line: 54 31 32 33 34 31 31 32 32 0D
-[CLIENT] eth_to_core_queue=0x24004de8
-[CLIENT] SendCmdToCore raw bytes: 54 31 32 33 34 31 31 32 32 0D
+[CLIENT] complete line: 74 31 32 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 74 31 32 0D
 [CLIENT] osMessageQueuePut -> 0
 [CLIENT] -> CORE OK
-[CORE] got cmd raw: 54 31 32 33 34 31 31 32 32 0D
-[CORE] resp str: t12341122
-[CORE] resp raw: 74 31 32 33 34 31 31 32 32 0D
+[CORE] got cmd raw: 74 31 32 0D
+[CORE] parse ERROR: unsupported or invalid command
+[CORE] resp str:
+[CORE] resp raw: 07
 [CORE] processed OK
-[CLIENT] got resp from CORE: t12341122
-[CLIENT] resp raw: 74 31 32 33 34 31 31 32 32 0D
-[CLIENT] TX->FAKE_CLIENT: t12341122
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 07
+[CLIENT] TX->FAKE_CLIENT:
+[CLIENT] complete line: 74 31 32 33 5A 31 32 32 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 74 31 32 33 5A 31 32 32 0D
+[CLIENT] osMessageQueuePut -> 0
+[CLIENT] -> CORE OK
+[CORE] got cmd raw: 74 31 32 33 5A 31 32 32 0D
+[CORE] parse ERROR: unsupported or invalid command
+[CORE] resp str:
+[CORE] resp raw: 07
+[CORE] processed OK
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 07
+[CLIENT] TX->FAKE_CLIENT:
+[CLIENT] complete line: 72 31 32 33 39 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 72 31 32 33 39 0D
+[CLIENT] osMessageQueuePut -> 0
+[CLIENT] -> CORE OK
+[CORE] got cmd raw: 72 31 32 33 39 0D
+[CORE] parse ERROR: unsupported or invalid command
+[CORE] resp str:
+[CORE] resp raw: 07
+[CORE] processed OK
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 07
+[CLIENT] TX->FAKE_CLIENT:
 [CLIENT] complete line: 43 0D
-[CLIENT] eth_to_core_queue=0x24004de8
+[CLIENT] eth_to_core_queue=0x24004e10
 [CLIENT] SendCmdToCore raw bytes: 43 0D
 [CLIENT] osMessageQueuePut -> 0
 [CLIENT] -> CORE OK
 [CORE] got cmd raw: 43 0D
+[CORE] parse OK, type=CLOSE
+[CORE] channel CLOSED
 [CORE] resp str:
 [CORE] resp raw: 0D
 [CORE] processed OK
 [CLIENT] got resp from CORE:
 [CLIENT] resp raw: 0D
+[CLIENT] TX->FAKE_CLIENT:
+[CLIENT] complete line: 74 31 32 33 32 31 31 32 32 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 74 31 32 33 32 31 31 32 32 0D
+[CLIENT] osMessageQueuePut -> 0
+[CLIENT] -> CORE OK
+[CORE] got cmd raw: 74 31 32 33 32 31 31 32 32 0D
+[CORE] parse OK, type=SEND_FRAME
+[CORE] parsed frame: ID=0x00000123 DLC=2 FLAGS=0x00 DATA=11 22
+[CORE] ERROR: cannot send frame, channel is CLOSED
+[CORE] resp str:
+[CORE] resp raw: 07
+[CORE] processed OK
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 07
+[CLIENT] TX->FAKE_CLIENT:
+[CLIENT] complete line: 4C 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 4C 0D
+[CLIENT] osMessageQueuePut -> 0
+[CLIENT] -> CORE OK
+[CORE] got cmd raw: 4C 0D
+[CORE] parse OK, type=LISTEN
+[CORE] channel LISTEN ONLY, bitrate=S8
+[CORE] resp str:
+[CORE] resp raw: 0D
+[CORE] processed OK
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 0D
+[CLIENT] TX->FAKE_CLIENT:
+[CLIENT] complete line: 74 31 32 33 32 31 31 32 32 0D
+[CLIENT] eth_to_core_queue=0x24004e10
+[CLIENT] SendCmdToCore raw bytes: 74 31 32 33 32 31 31 32 32 0D
+[CLIENT] osMessageQueuePut -> 0
+[CLIENT] -> CORE OK
+[CORE] got cmd raw: 74 31 32 33 32 31 31 32 32 0D
+[CORE] parse OK, type=SEND_FRAME
+[CORE] parsed frame: ID=0x00000123 DLC=2 FLAGS=0x00 DATA=11 22
+[CORE] ERROR: cannot send frame in LISTEN ONLY mode
+[CORE] resp str:
+[CORE] resp raw: 07
+[CORE] processed OK
+[CLIENT] got resp from CORE:
+[CLIENT] resp raw: 07
 [CLIENT] TX->FAKE_CLIENT:

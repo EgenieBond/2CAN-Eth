@@ -1,0 +1,3 @@
+../Core/Src/can_task.c:17:13:CanTask_PrintFrame	24	static
+../Core/Src/can_task.c:44:13:CanTask	32	static
+../Core/Src/can_task.c:67:6:CanTask_Start	48	static

@@ -1,2 +1,5 @@
-../Core/Src/core_task.c:22:13:CoreTask	160	static
-../Core/Src/core_task.c:75:6:CoreTask_Start	48	static
+../Core/Src/core_task.c:45:13:CoreTask_HandleEthCommand	136	static
+../Core/Src/core_task.c:210:20:CoreTask_CmdTypeToStr	16	static
+../Core/Src/core_task.c:224:13:CoreTask_HandleCanRx	88	static
+../Core/Src/core_task.c:270:13:CoreTask	96	static
+../Core/Src/core_task.c:301:6:CoreTask_Start	48	static

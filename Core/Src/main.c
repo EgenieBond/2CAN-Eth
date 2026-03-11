@@ -19,6 +19,7 @@
 
 #include "eth_app.h"
 #include "core_task.h"
+#include "can_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -336,6 +337,7 @@ void StartDefaultTask(void *argument)
   /* ВКЛЮЧАЕМ внутренний pipeline */
   EthApp_Init();
   CoreTask_Start();
+  CanTask_Start();
 
   /* start EthernetTask */
   EthernetTask_Start();
