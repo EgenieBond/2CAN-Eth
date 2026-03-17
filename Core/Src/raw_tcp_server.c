@@ -4,230 +4,210 @@
  * TCP RAW server (single client)
  */
 
+#include "raw_tcp_server.h"
+#include "client_handler.h"
 #include "lwip/tcp.h"
-#include "lwip/inet.h"     // ip4_addr1/2/3/4
+#include "lwip/inet.h"
 #include "debug_uart.h"
 #include <string.h>
+#include <stdint.h>
 
 #define TCP_SERVER_PORT 2001
-#define RX_BUFFER_SIZE  256
 
 static struct tcp_pcb *server_pcb = NULL;
 static struct tcp_pcb *client_pcb = NULL;
 
-static char rx_buffer[RX_BUFFER_SIZE];
-static int  rx_buffer_pos = 0;
-
 /* ===== CALLBACKS ===== */
-
-static err_t tcp_server_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
-{
-  LWIP_UNUSED_ARG(arg);
-  LWIP_UNUSED_ARG(tpcb);
-
-  DebugUART_Print("[TCP] CONNECTED cb err=%d\r\n", (int)err);
-  return ERR_OK;
-}
 
 static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
-  LWIP_UNUSED_ARG(arg);
-  LWIP_UNUSED_ARG(tpcb);
+    LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(tpcb);
 
-  DebugUART_Print("[TCP] SENT cb: acked=%u bytes\r\n", (unsigned)len);
-  return ERR_OK;
+    DebugUART_Print("[TCP] SENT cb: acked=%u bytes\r\n", (unsigned)len);
+    return ERR_OK;
 }
 
 static void tcp_server_error(void *arg, err_t err)
 {
-  LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(arg);
 
-  DebugUART_Print("[TCP] ERROR cb err=%d\r\n", (int)err);
-  client_pcb = NULL;
-  rx_buffer_pos = 0;
+    DebugUART_Print("[TCP] ERROR cb err=%d\r\n", (int)err);
+    client_pcb = NULL;
 }
 
 static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
                              struct pbuf *p, err_t err)
 {
-  LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(arg);
 
-  /* Connection closed by peer */
-  if (p == NULL)
-  {
-    DebugUART_Print("[TCP] Client disconnected (p==NULL)\r\n");
-
-    tcp_arg(tpcb, NULL);
-    tcp_recv(tpcb, NULL);
-    tcp_sent(tpcb, NULL);
-    tcp_err(tpcb, NULL);
-
-    tcp_close(tpcb);
-
-    client_pcb = NULL;
-    rx_buffer_pos = 0;
-    return ERR_OK;
-  }
-
-  if (err != ERR_OK)
-  {
-    DebugUART_Print("[TCP] RECV err=%d -> drop\r\n", (int)err);
-    pbuf_free(p);
-    return err;
-  }
-
-  /* Tell TCP we received data */
-  tcp_recved(tpcb, p->tot_len);
-
-  /* Process pbuf chain */
-  for (struct pbuf *q = p; q != NULL; q = q->next)
-  {
-    const uint8_t *data = (const uint8_t *)q->payload;
-    const uint16_t len  = q->len;
-
-    for (uint16_t i = 0; i < len; i++)
+    if (p == NULL)
     {
-      uint8_t ch = data[i];
+        DebugUART_Print("[TCP] Client disconnected (p==NULL)\r\n");
 
-      /* Ignore LF to support CRLF from Windows/Python */
-      if (ch == '\n') {
-        continue;
-      }
+        tcp_arg(tpcb, NULL);
+        tcp_recv(tpcb, NULL);
+        tcp_sent(tpcb, NULL);
+        tcp_err(tpcb, NULL);
 
-      if (rx_buffer_pos < (RX_BUFFER_SIZE - 1))
-      {
-        rx_buffer[rx_buffer_pos++] = (char)ch;
-
-        /* End of command on CR */
-        if (ch == '\r')
-        {
-          rx_buffer[rx_buffer_pos] = '\0';
-          DebugUART_Print("[TCP] CMD: %s", rx_buffer);
-
-          /* Echo back (for now) */
-          err_t wr = tcp_write(tpcb, rx_buffer, (u16_t)rx_buffer_pos, TCP_WRITE_FLAG_COPY);
-          if (wr != ERR_OK)
-          {
-            if (wr == ERR_MEM) {
-              DebugUART_Print("[TCP] tcp_write ERR_MEM (sndbuf full)\r\n");
-            } else {
-              DebugUART_Print("[TCP] tcp_write err=%d\r\n", (int)wr);
-            }
-          }
-          else
-          {
-            err_t out = tcp_output(tpcb);
-            DebugUART_Print("[TCP] tcp_output err=%d\r\n", (int)out);
-          }
-
-          rx_buffer_pos = 0;
-        }
-      }
-      else
-      {
-        DebugUART_Print("[TCP] RX overflow -> reset line buffer\r\n");
-        rx_buffer_pos = 0;
-        /* break out of both loops */
-        q = NULL;
-        break;
-      }
+        tcp_close(tpcb);
+        client_pcb = NULL;
+        return ERR_OK;
     }
-  }
 
-  pbuf_free(p);
-  return ERR_OK;
+    if (err != ERR_OK)
+    {
+        DebugUART_Print("[TCP] RECV err=%d -> drop\r\n", (int)err);
+        pbuf_free(p);
+        return err;
+    }
+
+    tcp_recved(tpcb, p->tot_len);
+
+    for (struct pbuf *q = p; q != NULL; q = q->next)
+    {
+        const uint8_t *data = (const uint8_t *)q->payload;
+        const uint16_t len  = q->len;
+
+        DebugUART_Print("[TCP] RX chunk len=%u\r\n", (unsigned)len);
+
+        /* Передаем байты в уже готовый pipeline */
+        ClientHandler_InputBytes(data, len);
+    }
+
+    pbuf_free(p);
+    return ERR_OK;
 }
 
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
-  LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(arg);
 
-  if (err != ERR_OK || newpcb == NULL)
-  {
-    DebugUART_Print("[TCP] ACCEPT err=%d newpcb=%p\r\n", (int)err, (void*)newpcb);
-    return ERR_VAL;
-  }
+    if (err != ERR_OK || newpcb == NULL)
+    {
+        DebugUART_Print("[TCP] ACCEPT err=%d newpcb=%p\r\n", (int)err, (void*)newpcb);
+        return ERR_VAL;
+    }
 
-  if (client_pcb)
-  {
-    DebugUART_Print("[TCP] Reject 2nd client\r\n");
-    tcp_abort(newpcb);
-    return ERR_ABRT;
-  }
+    if (client_pcb != NULL)
+    {
+        DebugUART_Print("[TCP] Reject 2nd client\r\n");
+        tcp_abort(newpcb);
+        return ERR_ABRT;
+    }
 
-  client_pcb = newpcb;
-  rx_buffer_pos = 0;
+    client_pcb = newpcb;
 
-  DebugUART_Print("[TCP] SYN->ACCEPT from %d.%d.%d.%d:%u\r\n",
-                  ip4_addr1(&newpcb->remote_ip),
-                  ip4_addr2(&newpcb->remote_ip),
-                  ip4_addr3(&newpcb->remote_ip),
-                  ip4_addr4(&newpcb->remote_ip),
-                  (unsigned)newpcb->remote_port);
+    DebugUART_Print("[TCP] ACCEPT from %d.%d.%d.%d:%u\r\n",
+                    ip4_addr1(&newpcb->remote_ip),
+                    ip4_addr2(&newpcb->remote_ip),
+                    ip4_addr3(&newpcb->remote_ip),
+                    ip4_addr4(&newpcb->remote_ip),
+                    (unsigned)newpcb->remote_port);
 
-  tcp_nagle_disable(newpcb);
+    tcp_nagle_disable(newpcb);
 
-  tcp_arg(newpcb, NULL);
-  tcp_recv(newpcb, tcp_server_recv);
-  tcp_err(newpcb, tcp_server_error);
-  tcp_sent(newpcb, tcp_server_sent);
+    tcp_arg(newpcb, NULL);
+    tcp_recv(newpcb, tcp_server_recv);
+    tcp_err(newpcb, tcp_server_error);
+    tcp_sent(newpcb, tcp_server_sent);
 
-  /* "connected" is usually for active-open; we call it only for logging */
-  tcp_server_connected(NULL, newpcb, ERR_OK);
+    return ERR_OK;
+}
 
-  /* Welcome message */
-  const char *welcome = "CAN-Ethernet Gateway ready. Use SLCAN commands.\r\n";
-  err_t wr = tcp_write(newpcb, welcome, (u16_t)strlen(welcome), TCP_WRITE_FLAG_COPY);
-  if (wr == ERR_OK)
-  {
-    tcp_output(newpcb);
-  }
-  else
-  {
-    DebugUART_Print("[TCP] welcome tcp_write err=%d\r\n", (int)wr);
-  }
+/* ===== PUBLIC API ===== */
 
-  return ERR_OK;
+int RawTcpServer_HasClient(void)
+{
+    return (client_pcb != NULL) ? 1 : 0;
+}
+
+int RawTcpServer_Send(const uint8_t *data, size_t len)
+{
+	DebugUART_Print("[TCP] SEND request len=%u client_pcb=%p sndbuf=%u\r\n",
+	                (unsigned)len,
+	                (void*)client_pcb,
+	                client_pcb ? (unsigned)tcp_sndbuf(client_pcb) : 0U);
+
+    err_t wr;
+    err_t out;
+
+    if ((data == NULL) || (len == 0U))
+        return -1;
+
+    if (client_pcb == NULL)
+    {
+        DebugUART_Print("[TCP] SEND skipped: no active client\r\n");
+        return -2;
+    }
+
+    if (client_pcb != NULL)
+    {
+        DebugUART_Print("[TCP] client state=%d local_port=%u remote_port=%u\r\n",
+                        (int)client_pcb->state,
+                        (unsigned)client_pcb->local_port,
+                        (unsigned)client_pcb->remote_port);
+    }
+
+    wr = tcp_write(client_pcb, data, (u16_t)len, TCP_WRITE_FLAG_COPY);
+    if (wr != ERR_OK)
+    {
+        if (wr == ERR_MEM)
+            DebugUART_Print("[TCP] tcp_write ERR_MEM\r\n");
+        else
+            DebugUART_Print("[TCP] tcp_write err=%d\r\n", (int)wr);
+        return -3;
+    }
+
+    out = tcp_output(client_pcb);
+    if (out != ERR_OK)
+    {
+        DebugUART_Print("[TCP] tcp_output err=%d\r\n", (int)out);
+        return -4;
+    }
+
+    DebugUART_Print("[TCP] TX OK len=%u\r\n", (unsigned)len);
+    return 0;
 }
 
 /* ===== INIT ===== */
 
 void RawTcpServer_Init(void)
 {
-  DebugUART_Print("[TCP] RawTcpServer_Init enter\r\n");
+    DebugUART_Print("[TCP] RawTcpServer_Init enter\r\n");
 
-  if (server_pcb)
-  {
-    DebugUART_Print("[TCP] closing previous server pcb\r\n");
-    tcp_close(server_pcb);
-    server_pcb = NULL;
-  }
+    if (server_pcb != NULL)
+    {
+        DebugUART_Print("[TCP] previous server pcb exists\r\n");
+        return;
+    }
 
-  server_pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
-  if (!server_pcb)
-  {
-    DebugUART_Print("[TCP] tcp_new_ip_type failed\r\n");
-    return;
-  }
+    server_pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+    if (!server_pcb)
+    {
+        DebugUART_Print("[TCP] tcp_new_ip_type failed\r\n");
+        return;
+    }
 
-  err_t err = tcp_bind(server_pcb, IP_ANY_TYPE, TCP_SERVER_PORT);
-  if (err != ERR_OK)
-  {
-    DebugUART_Print("[TCP] tcp_bind failed err=%d\r\n", (int)err);
-    tcp_close(server_pcb);
-    server_pcb = NULL;
-    return;
-  }
+    err_t err = tcp_bind(server_pcb, IP_ANY_TYPE, TCP_SERVER_PORT);
+    if (err != ERR_OK)
+    {
+        DebugUART_Print("[TCP] tcp_bind failed err=%d\r\n", (int)err);
+        tcp_close(server_pcb);
+        server_pcb = NULL;
+        return;
+    }
 
-  err_t err2 = ERR_OK;
-  server_pcb = tcp_listen_with_backlog_and_err(server_pcb, 2, &err2);
-  if (!server_pcb)
-  {
-    DebugUART_Print("[TCP] tcp_listen failed err=%d\r\n", (int)err2);
-    return;
-  }
+    err_t err2 = ERR_OK;
+    server_pcb = tcp_listen_with_backlog_and_err(server_pcb, 1, &err2);
+    if (!server_pcb)
+    {
+        DebugUART_Print("[TCP] tcp_listen failed err=%d\r\n", (int)err2);
+        return;
+    }
 
-  tcp_accept(server_pcb, tcp_server_accept);
+    tcp_accept(server_pcb, tcp_server_accept);
+    DebugUART_Print("[TCP] accept callback installed, pcb=%p\r\n", (void*)server_pcb);
 
-  DebugUART_Print("[TCP] Listening on port %d\r\n", TCP_SERVER_PORT);
+    DebugUART_Print("[TCP] Listening on port %d\r\n", TCP_SERVER_PORT);
 }

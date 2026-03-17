@@ -189,6 +189,10 @@ else
                   ip4_addr2(netif_ip4_addr(&gnetif)),
                   ip4_addr3(netif_ip4_addr(&gnetif)),
                   ip4_addr4(netif_ip4_addr(&gnetif)));
+  DebugUART_Print("[ETH] netif flags=0x%02X\r\n", (unsigned)gnetif.flags);
+  DebugUART_Print("[ETH] netif MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                  gnetif.hwaddr[0], gnetif.hwaddr[1], gnetif.hwaddr[2],
+                  gnetif.hwaddr[3], gnetif.hwaddr[4], gnetif.hwaddr[5]);
 
   while (!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif)) {
     DebugUART_Print("[ETH] waiting netif up/link... up=%d link=%d\r\n",
@@ -196,8 +200,19 @@ else
     osDelay(100);
   }
 
-  /* 4) TEMP: пока проверяем fake-client pipeline, TCP server не стартуем */
-  DebugUART_Print("[ETH] TEMP: RAW TCP server start is disabled\r\n");
+  if (ip4_addr4(netif_ip4_addr(&gnetif)) == 100)
+  {
+      DebugUART_Print("[ETH] IP check OK: netif has 10.0.0.100\r\n");
+  }
+  else
+  {
+      DebugUART_Print("[ETH] IP check FAIL\r\n");
+  }
+
+  /* 4) Стартуем RAW TCP server в tcpip_thread */
+  DebugUART_Print("[ETH] starting RAW TCP server...\r\n");
+  err_t cb_err = tcpip_callback(tcp_server_init_cb, NULL);
+  DebugUART_Print("[ETH] tcpip_callback(raw server) -> %d\r\n", (int)cb_err);
 
   for (;;)
   {
