@@ -118,8 +118,8 @@ void ClientHandler_PollTx(void)
 #if CLIENT_USE_FAKE_SOURCE
         DebugUART_Print("[CLIENT] TX->FAKE_CLIENT: %s\r\n", resp.data);
 #else
-        int send_rc = RawTcpServer_Send((const uint8_t *)resp.data, strlen(resp.data));
-        DebugUART_Print("[CLIENT] TX->TCP rc=%d\r\n", send_rc);
+        int send_rc = RawTcpServer_SendAsync((const uint8_t *)resp.data, strlen(resp.data));
+        DebugUART_Print("[CLIENT] TX->TCP async rc=%d\r\n", send_rc);
 #endif
     }
 }

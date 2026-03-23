@@ -335,9 +335,9 @@ void StartDefaultTask(void *argument)
   DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
   /* ВКЛЮЧАЕМ внутренний pipeline */
-  EthApp_Init();
-  CoreTask_Start();
-  CanTask_Start();
+  //EthApp_Init();
+  //CoreTask_Start();
+  //CanTask_Start();
 
   /* start EthernetTask */
   EthernetTask_Start();
