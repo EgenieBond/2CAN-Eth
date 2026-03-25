@@ -43,10 +43,6 @@
 extern struct netif gnetif;
 void invalidate_dcache_range(void *addr, uint32_t size);
 static uint8_t g_MACAddr[6] = {0x00,0x80,0xE1,0x00,0x00,0x00};
-
-static ETH_BufferTypeDef g_TxBuffer[ETH_TX_DESC_CNT];
-
-/* THIS IS THE DEFINITION (only once in the whole project) */
 //osEventFlagsId_t g_ethLinkEvt = NULL;
 
 /* USER CODE END 0 */
@@ -182,17 +178,21 @@ lan8742_IOCtx_t  LAN8742_IOCtx = {ETH_PHY_IO_Init,
 #include <stdint.h>
 #include "lwip/netif.h"
 
-static uint8_t arp_tx_frame[60] __attribute__((aligned(32)));
+//static uint8_t arp_tx_frame[60] __attribute__((aligned(32)));
 static err_t low_level_output(struct netif *netif, struct pbuf *p);
-static void TryManualArpReply(const struct pbuf *p, struct netif *netif);
-static ETH_BufferTypeDef g_TxBuffer[ETH_TX_DESC_CNT];
+static ETH_BufferTypeDef g_TxBuffer[ETH_TX_DESC_CNT] __attribute__((aligned(32)));
 
 // глобальные счётчики
 volatile uint32_t g_rx_irq_cnt = 0;
 volatile uint32_t g_rx_sem_cnt = 0;
-
 volatile uint32_t g_tx_cplt_cnt = 0;
 volatile uint32_t g_tx_err_cnt  = 0;
+
+volatile uint32_t g_rx_alloc_ok_cnt   = 0;
+volatile uint32_t g_rx_alloc_fail_cnt = 0;
+volatile uint32_t g_rx_link_cnt       = 0;
+volatile uint32_t g_rx_read_ok_cnt    = 0;
+volatile uint32_t g_rx_read_null_cnt  = 0;
 
 /* D-Cache line size for Cortex-M7 is 32 bytes */
 #define DCACHE_LINE_SIZE 32U
@@ -247,151 +247,6 @@ static uint16_t pbuf_copy_head(uint8_t *dst, uint16_t dst_len, const struct pbuf
 static void log_rx_pbuf(const struct pbuf *p)
 {
   LWIP_UNUSED_ARG(p);
-}
-
-static void TryManualArpReply(const struct pbuf *p, struct netif *netif)
-{
-  static uint32_t arp_reply_debug_once = 0;
-
-  DebugUART_Print("[ARP-MANUAL] enter p=%p netif=%p tot=%u\r\n",
-                  (void *)p, (void *)netif, (unsigned)(p ? p->tot_len : 0));
-
-  if ((p == NULL) || (netif == NULL))
-  {
-    DebugUART_Print("[ARP-MANUAL] exit: null arg\r\n");
-    return;
-  }
-
-  if (p->tot_len < 42)
-  {
-    DebugUART_Print("[ARP-MANUAL] exit: too short (%u)\r\n", (unsigned)p->tot_len);
-    return;
-  }
-
-  uint8_t head[64];
-  u16_t copied = pbuf_copy_partial((const struct pbuf *)p, head, sizeof(head), 0);
-  if (copied < 42)
-  {
-    DebugUART_Print("[ARP-MANUAL] exit: copied=%u < 42\r\n", (unsigned)copied);
-    return;
-  }
-
-  uint16_t eth_type = (uint16_t)((head[12] << 8) | head[13]);
-  if (eth_type != 0x0806)
-  {
-    return; /* not ARP */
-  }
-
-  const uint8_t *arp = &head[14];
-
-  uint16_t htype = (uint16_t)((arp[0] << 8) | arp[1]);
-  uint16_t ptype = (uint16_t)((arp[2] << 8) | arp[3]);
-  uint8_t  hlen  = arp[4];
-  uint8_t  plen  = arp[5];
-  uint16_t oper  = (uint16_t)((arp[6] << 8) | arp[7]);
-
-  DebugUART_Print("[ARP-MANUAL] ARP htype=%u ptype=0x%04X hlen=%u plen=%u op=%u\r\n",
-                  (unsigned)htype, (unsigned)ptype,
-                  (unsigned)hlen, (unsigned)plen,
-                  (unsigned)oper);
-
-  if (htype != 1 || ptype != 0x0800 || hlen != 6 || plen != 4 || oper != 1)
-  {
-    DebugUART_Print("[ARP-MANUAL] exit: not Ethernet/IPv4 ARP request\r\n");
-    return;
-  }
-
-  const uint8_t *sender_mac = &arp[8];
-  const uint8_t *sender_ip  = &arp[14];
-  const uint8_t *target_ip  = &arp[24];
-
-  const ip4_addr_t *my_ip = netif_ip4_addr(netif);
-
-  uint8_t my_ip_bytes[4] = {
-    ip4_addr1(my_ip),
-    ip4_addr2(my_ip),
-    ip4_addr3(my_ip),
-    ip4_addr4(my_ip)
-  };
-
-  DebugUART_Print("[ARP-MANUAL] sender=%u.%u.%u.%u target=%u.%u.%u.%u my=%u.%u.%u.%u\r\n",
-                  sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3],
-                  target_ip[0], target_ip[1], target_ip[2], target_ip[3],
-                  my_ip_bytes[0], my_ip_bytes[1], my_ip_bytes[2], my_ip_bytes[3]);
-
-  if (memcmp(target_ip, my_ip_bytes, 4) != 0)
-  {
-    DebugUART_Print("[ARP-MANUAL] exit: target IP is not mine\r\n");
-    return;
-  }
-
-  /* чтобы не спамить слишком сильно */
-  if (arp_reply_debug_once < 10)
-  {
-    arp_reply_debug_once++;
-    DebugUART_Print("[ARP-MANUAL] building ARP reply #%lu\r\n",
-                    (unsigned long)arp_reply_debug_once);
-  }
-
-  /* Ethernet minimum frame size without FCS = 60 bytes */
-  const uint16_t arp_frame_len = 60;
-
-  memset(arp_tx_frame, 0, sizeof(arp_tx_frame));
-  uint8_t *f = arp_tx_frame;
-
-  /* Ethernet header */
-  memcpy(&f[0],  sender_mac, 6);   /* dst */
-  memcpy(&f[6],  g_MACAddr,  6);   /* src */
-  f[12] = 0x08;
-  f[13] = 0x06;                    /* ARP */
-
-  /* ARP payload */
-  f[14] = 0x00; f[15] = 0x01;   /* htype = Ethernet */
-  f[16] = 0x08; f[17] = 0x00;   /* ptype = IPv4 */
-  f[18] = 0x06;                 /* hlen = 6 */
-  f[19] = 0x04;                 /* plen = 4 */
-  f[20] = 0x00; f[21] = 0x02;   /* oper = reply */
-
-  memcpy(&f[22], g_MACAddr,   6); /* sender MAC = us */
-  memcpy(&f[28], my_ip_bytes, 4); /* sender IP  = us */
-  memcpy(&f[32], sender_mac,  6); /* target MAC = original sender */
-  memcpy(&f[38], sender_ip,   4); /* target IP  = original sender */
-
-  /* bytes 42..59 = padding zeros */
-
-  if (arp_reply_debug_once <= 10)
-  {
-    DebugUART_Print("[ARP-MANUAL] TX frame bytes (first 60):\r\n");
-    for (int i = 0; i < arp_frame_len; i++)
-    {
-      DebugUART_Print("%02X ", f[i]);
-      if (((i + 1) % 16) == 0)
-        DebugUART_Print("\r\n");
-    }
-    DebugUART_Print("\r\n");
-  }
-
-  ETH_BufferTypeDef txbuf;
-  memset(&txbuf, 0, sizeof(txbuf));
-  txbuf.buffer = arp_tx_frame;
-  txbuf.len    = arp_frame_len;
-  txbuf.next   = NULL;
-
-  clean_dcache_range(arp_tx_frame, arp_frame_len);
-
-  TxConfig.Length       = arp_frame_len;
-  TxConfig.TxBuffer     = &txbuf;
-  TxConfig.pData        = NULL;
-  TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
-  TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
-
-  HAL_StatusTypeDef st = HAL_ETH_Transmit_IT(&heth, &TxConfig);
-
-  DebugUART_Print("[ARP-MANUAL] direct HAL tx st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
-                  (int)st,
-                  (unsigned long)HAL_ETH_GetError(&heth),
-                  (unsigned long)HAL_ETH_GetDMAError(&heth));
 }
 
 static void netif_link_up_in_tcpip(void *arg)
@@ -449,15 +304,14 @@ static void log_if_arp_for_me(struct pbuf *p, struct netif *netif)
   if (pbuf_copy_partial(p, head, sizeof(head), 0) < 42)
     return;
 
-  /* Ethernet type */
   uint16_t eth_type = (uint16_t)((head[12] << 8) | head[13]);
-  if (eth_type != 0x0806)   /* not ARP */
+  if (eth_type != 0x0806)
     return;
 
   const uint8_t *arp = &head[14];
 
   uint16_t oper = (uint16_t)((arp[6] << 8) | arp[7]);
-  if (oper != 1)            /* not ARP request */
+  if (oper != 1)
     return;
 
   const ip4_addr_t *my_ip = netif_ip4_addr(netif);
@@ -480,6 +334,113 @@ static void log_if_arp_for_me(struct pbuf *p, struct netif *netif)
                       arp[14], arp[15], arp[16], arp[17]);
     }
   }
+}
+
+static int is_arp_for_me(const struct pbuf *p, struct netif *netif)
+{
+  if ((p == NULL) || (netif == NULL) || (p->tot_len < 42))
+    return 0;
+
+  uint8_t head[42];
+  if (pbuf_copy_partial((const struct pbuf *)p, head, sizeof(head), 0) < 42)
+    return 0;
+
+  uint16_t eth_type = (uint16_t)((head[12] << 8) | head[13]);
+  if (eth_type != 0x0806)   /* not ARP */
+    return 0;
+
+  const uint8_t *arp = &head[14];
+  uint16_t oper = (uint16_t)((arp[6] << 8) | arp[7]);
+  if (oper != 1)            /* not ARP request */
+    return 0;
+
+  const ip4_addr_t *my_ip = netif_ip4_addr(netif);
+  uint8_t my_ip_bytes[4] = {
+    ip4_addr1(my_ip),
+    ip4_addr2(my_ip),
+    ip4_addr3(my_ip),
+    ip4_addr4(my_ip)
+  };
+
+  const uint8_t *target_ip = &arp[24];
+
+  return (memcmp(target_ip, my_ip_bytes, 4) == 0) ? 1 : 0;
+}
+
+static void Debug_DumpEthRegs(const char *tag)
+{
+  DebugUART_Print("[%s] DMACSR=0x%08lX DMAMR=0x%08lX MACCR=0x%08lX\r\n",
+                  tag,
+                  (unsigned long)ETH->DMACSR,
+                  (unsigned long)ETH->DMAMR,
+                  (unsigned long)ETH->MACCR);
+
+  DebugUART_Print("[%s] MTLTQDR=0x%08lX MTLRQDR=0x%08lX\r\n",
+                  tag,
+                  (unsigned long)ETH->MTLTQDR,
+                  (unsigned long)ETH->MTLRQDR);
+}
+
+static void dump_arp_packet(const struct pbuf *p, struct netif *netif)
+{
+  if ((p == NULL) || (netif == NULL) || (p->tot_len < 42))
+    return;
+
+  uint8_t head[64];
+  if (pbuf_copy_partial((const struct pbuf *)p, head, sizeof(head), 0) < 42)
+    return;
+
+  uint16_t eth_type = (uint16_t)((head[12] << 8) | head[13]);
+  if (eth_type != 0x0806)
+    return;
+
+  const uint8_t *arp = &head[14];
+
+  uint16_t htype = (uint16_t)((arp[0] << 8) | arp[1]);
+  uint16_t ptype = (uint16_t)((arp[2] << 8) | arp[3]);
+  uint8_t  hlen  = arp[4];
+  uint8_t  plen  = arp[5];
+  uint16_t oper  = (uint16_t)((arp[6] << 8) | arp[7]);
+
+  const uint8_t *sha = &arp[8];
+  const uint8_t *spa = &arp[14];
+  const uint8_t *tha = &arp[18];
+  const uint8_t *tpa = &arp[24];
+
+  DebugUART_Print("[ARP-DUMP] p=%p len=%u tot=%u ref=%u payload=%p\r\n",
+                  (void *)p,
+                  (unsigned)p->len,
+                  (unsigned)p->tot_len,
+                  (unsigned)p->ref,
+                  p->payload);
+
+  DebugUART_Print("[ARP-DUMP] ETH dst=%02X:%02X:%02X:%02X:%02X:%02X src=%02X:%02X:%02X:%02X:%02X:%02X type=0x%04X\r\n",
+                  head[0], head[1], head[2], head[3], head[4], head[5],
+                  head[6], head[7], head[8], head[9], head[10], head[11],
+                  (unsigned)eth_type);
+
+  DebugUART_Print("[ARP-DUMP] htype=%u ptype=0x%04X hlen=%u plen=%u oper=%u\r\n",
+                  (unsigned)htype,
+                  (unsigned)ptype,
+                  (unsigned)hlen,
+                  (unsigned)plen,
+                  (unsigned)oper);
+
+  DebugUART_Print("[ARP-DUMP] SHA=%02X:%02X:%02X:%02X:%02X:%02X SPA=%u.%u.%u.%u\r\n",
+                  sha[0], sha[1], sha[2], sha[3], sha[4], sha[5],
+                  spa[0], spa[1], spa[2], spa[3]);
+
+  DebugUART_Print("[ARP-DUMP] THA=%02X:%02X:%02X:%02X:%02X:%02X TPA=%u.%u.%u.%u\r\n",
+                  tha[0], tha[1], tha[2], tha[3], tha[4], tha[5],
+                  tpa[0], tpa[1], tpa[2], tpa[3]);
+
+  DebugUART_Print("[ARP-DUMP] my MAC=%02X:%02X:%02X:%02X:%02X:%02X my IP=%u.%u.%u.%u\r\n",
+                  netif->hwaddr[0], netif->hwaddr[1], netif->hwaddr[2],
+                  netif->hwaddr[3], netif->hwaddr[4], netif->hwaddr[5],
+                  ip4_addr1(netif_ip4_addr(netif)),
+                  ip4_addr2(netif_ip4_addr(netif)),
+                  ip4_addr3(netif_ip4_addr(netif)),
+                  ip4_addr4(netif_ip4_addr(netif)));
 }
 
 /* USER CODE END 3 */
@@ -506,10 +467,30 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
-  (void)handlerEth;
+  uint32_t hal_err = HAL_ETH_GetError(handlerEth);
+  uint32_t dma_err = HAL_ETH_GetDMAError(handlerEth);
 
   g_tx_cplt_cnt++;
-  osSemaphoreRelease(TxPktSemaphore);
+
+  DebugUART_Print("[TX] HAL_ETH_TxCpltCallback ENTER cnt=%lu heth=%p hal_err=0x%08lX dma_err=0x%08lX\r\n",
+                  (unsigned long)g_tx_cplt_cnt,
+                  (void *)handlerEth,
+                  (unsigned long)hal_err,
+                  (unsigned long)dma_err);
+
+  DebugUART_Print("[TX-CPLT] DMACSR=0x%08lX DMAMR=0x%08lX MACCR=0x%08lX\r\n",
+                  (unsigned long)ETH->DMACSR,
+                  (unsigned long)ETH->DMAMR,
+                  (unsigned long)ETH->MACCR);
+
+  DebugUART_Print("[TX-CPLT] MTLTQDR=0x%08lX MTLRQDR=0x%08lX\r\n",
+                  (unsigned long)ETH->MTLTQDR,
+                  (unsigned long)ETH->MTLRQDR);
+
+  osStatus_t s = osSemaphoreRelease(TxPktSemaphore);
+  DebugUART_Print("[TX] HAL_ETH_TxCpltCallback sem release -> %ld\r\n", (long)s);
+
+  DebugUART_Print("[TX] HAL_ETH_TxCpltCallback EXIT\r\n");
 }
 /**
   * @brief  Ethernet DMA transfer error callback
@@ -518,16 +499,37 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
-  g_tx_err_cnt++;
-  DebugUART_Print("[ETH] ERROR callback cnt=%lu hal_err=0x%08lX dma_err=0x%08lX\r\n",
-                  (unsigned long)g_tx_err_cnt,
-                  (unsigned long)HAL_ETH_GetError(handlerEth),
-                  (unsigned long)HAL_ETH_GetDMAError(handlerEth));
+  uint32_t hal_err = HAL_ETH_GetError(handlerEth);
+  uint32_t dma_err = HAL_ETH_GetDMAError(handlerEth);
 
-  if((HAL_ETH_GetDMAError(handlerEth) & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
+  g_tx_err_cnt++;
+
+  DebugUART_Print("[ETH] ERROR callback ENTER cnt=%lu heth=%p hal_err=0x%08lX dma_err=0x%08lX\r\n",
+                  (unsigned long)g_tx_err_cnt,
+                  (void *)handlerEth,
+                  (unsigned long)hal_err,
+                  (unsigned long)dma_err);
+
+  DebugUART_Print("[ETH-ERR] DMACSR=0x%08lX DMAMR=0x%08lX MACCR=0x%08lX\r\n",
+                  (unsigned long)ETH->DMACSR,
+                  (unsigned long)ETH->DMAMR,
+                  (unsigned long)ETH->MACCR);
+
+  DebugUART_Print("[ETH-ERR] MTLTQDR=0x%08lX MTLRQDR=0x%08lX\r\n",
+                  (unsigned long)ETH->MTLTQDR,
+                  (unsigned long)ETH->MTLRQDR);
+
+  osStatus_t s1 = osSemaphoreRelease(TxPktSemaphore);
+  DebugUART_Print("[ETH] ERROR callback tx sem release -> %ld\r\n", (long)s1);
+
+  if ((dma_err & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
   {
-     osSemaphoreRelease(RxPktSemaphore);
+    DebugUART_Print("[ETH] ERROR callback: RBU detected -> wake RX\r\n");
+    osStatus_t s2 = osSemaphoreRelease(RxPktSemaphore);
+    DebugUART_Print("[ETH] ERROR callback rx sem release -> %ld\r\n", (long)s2);
   }
+
+  DebugUART_Print("[ETH] ERROR callback EXIT\r\n");
 }
 
 /* USER CODE BEGIN 4 */
@@ -720,7 +722,6 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
 
   uint32_t i = 0U;
   struct pbuf *q = NULL;
-  err_t errval = ERR_OK;
 
   LWIP_UNUSED_ARG(netif);
 
@@ -734,12 +735,11 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     eth_type = (uint16_t)((hdr[12] << 8) | hdr[13]);
   }
 
-  static uint32_t arp_tx_log_cnt = 0U;
-  if ((eth_type == 0x0806U) && (arp_tx_log_cnt < 20U))
-  {
-    arp_tx_log_cnt++;
-    DebugUART_Print("[TX] ARP frame queued, tot_len=%u\r\n", (unsigned)p->tot_len);
-  }
+  DebugUART_Print("[TX] low_level_output ENTER p=%p tot_len=%u type=0x%04X ref=%u\r\n",
+                  (void *)p,
+                  (unsigned)(p ? p->tot_len : 0U),
+                  (unsigned)eth_type,
+                  (unsigned)(p ? p->ref : 0U));
 
   for (q = p; q != NULL; q = q->next)
   {
@@ -756,8 +756,15 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     g_TxBuffer[i].len    = q->len;
     g_TxBuffer[i].next   = NULL;
 
+    DebugUART_Print("[TX] seg[%lu]: payload=%p len=%u\r\n",
+                    (unsigned long)i,
+                    q->payload,
+                    (unsigned)q->len);
+
     if (i > 0U)
+    {
       g_TxBuffer[i - 1U].next = &g_TxBuffer[i];
+    }
 
     i++;
   }
@@ -767,11 +774,12 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     clean_dcache_range(g_TxBuffer[j].buffer, g_TxBuffer[j].len);
   }
 
+  clean_dcache_range(g_TxBuffer, sizeof(g_TxBuffer));
+
   TxConfig.Length   = p->tot_len;
   TxConfig.TxBuffer = g_TxBuffer;
   TxConfig.pData    = p;
 
-  /* checksum offload only for IP/IPv6 packets */
   if ((eth_type == 0x0800U) || (eth_type == 0x86DDU))
   {
     TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -783,45 +791,78 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
   }
 
+  DebugUART_Print("[TX] before pbuf_ref: ref=%u\r\n", (unsigned)p->ref);
   pbuf_ref(p);
+  DebugUART_Print("[TX] after  pbuf_ref: ref=%u\r\n", (unsigned)p->ref);
 
-  do
+  DebugUART_Print("[TX-BEFORE] DMACSR=0x%08lX DMAMR=0x%08lX MACCR=0x%08lX\r\n",
+                  (unsigned long)ETH->DMACSR,
+                  (unsigned long)ETH->DMAMR,
+                  (unsigned long)ETH->MACCR);
+
+  DebugUART_Print("[TX-BEFORE] MTLTQDR=0x%08lX MTLRQDR=0x%08lX\r\n",
+                  (unsigned long)ETH->MTLTQDR,
+                  (unsigned long)ETH->MTLRQDR);
+
+  HAL_StatusTypeDef st = HAL_ETH_Transmit_IT(&heth, &TxConfig);
+
+  DebugUART_Print("[TX] HAL_ETH_Transmit_IT ret=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
+                  (int)st,
+                  (unsigned long)HAL_ETH_GetError(&heth),
+                  (unsigned long)HAL_ETH_GetDMAError(&heth));
+
+  DebugUART_Print("[TX-AFTER-CALL] DMACSR=0x%08lX DMAMR=0x%08lX MACCR=0x%08lX\r\n",
+                  (unsigned long)ETH->DMACSR,
+                  (unsigned long)ETH->DMAMR,
+                  (unsigned long)ETH->MACCR);
+
+  DebugUART_Print("[TX-AFTER-CALL] MTLTQDR=0x%08lX MTLRQDR=0x%08lX\r\n",
+                  (unsigned long)ETH->MTLTQDR,
+                  (unsigned long)ETH->MTLRQDR);
+
+  if (st != HAL_OK)
   {
-    HAL_StatusTypeDef st = HAL_ETH_Transmit_IT(&heth, &TxConfig);
+    DebugUART_Print("[TX] HAL_ETH_Transmit_IT FAIL -> pbuf_free\r\n");
+    pbuf_free(p);
 
-    if (st == HAL_OK)
-    {
-      errval = ERR_OK;
-    }
-    else
-    {
-      uint32_t hal_err = HAL_ETH_GetError(&heth);
+#if ETH_PAD_SIZE
+    pbuf_header(p, ETH_PAD_SIZE);
+#endif
+    return ERR_IF;
+  }
 
-      DebugUART_Print("[TX] HAL_ETH_Transmit_IT FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
-                      (int)st,
-                      (unsigned long)hal_err,
-                      (unsigned long)HAL_ETH_GetDMAError(&heth));
+  DebugUART_Print("[TX] waiting TxPktSemaphore...\r\n");
+  osStatus_t sem_st = osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT);
 
-      if (hal_err & HAL_ETH_ERROR_BUSY)
-      {
-        osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT);
-        HAL_ETH_ReleaseTxPacket(&heth);
-        errval = ERR_BUF;
-      }
-      else
-      {
-        DebugUART_Print("[TX] FATAL TX ERROR\r\n");
-        pbuf_free(p);
-        errval = ERR_IF;
-      }
-    }
-  } while (errval == ERR_BUF);
+  DebugUART_Print("[TX] osSemaphoreAcquire(TxPktSemaphore) -> %ld\r\n", (long)sem_st);
+
+  DebugUART_Print("[TX-AFTER-WAIT] DMACSR=0x%08lX DMAMR=0x%08lX MACCR=0x%08lX\r\n",
+                  (unsigned long)ETH->DMACSR,
+                  (unsigned long)ETH->DMAMR,
+                  (unsigned long)ETH->MACCR);
+
+  DebugUART_Print("[TX-AFTER-WAIT] MTLTQDR=0x%08lX MTLRQDR=0x%08lX\r\n",
+                  (unsigned long)ETH->MTLTQDR,
+                  (unsigned long)ETH->MTLRQDR);
+
+  if (sem_st != osOK)
+  {
+    DebugUART_Print("[TX] timeout/error waiting Tx complete\r\n");
+    pbuf_free(p);
+
+#if ETH_PAD_SIZE
+    pbuf_header(p, ETH_PAD_SIZE);
+#endif
+    return ERR_IF;
+  }
+
+  DebugUART_Print("[TX] low_level_output EXIT OK ref_now=%u\r\n", (unsigned)p->ref);
 
 #if ETH_PAD_SIZE
   pbuf_header(p, ETH_PAD_SIZE);
 #endif
 
-  return errval;
+  return ERR_OK;
 }
 
 /**
@@ -839,11 +880,50 @@ static struct pbuf * low_level_input(struct netif *netif)
 
   if (RxAllocStatus == RX_ALLOC_OK)
   {
-    HAL_ETH_ReadData(&heth, (void **)&p);
+    HAL_StatusTypeDef st = HAL_ETH_ReadData(&heth, (void **)&p);
 
-    if (p != NULL)
+    if (st == HAL_OK)
     {
-      log_if_arp_for_me(p, netif);
+      if (p != NULL)
+      {
+        static uint32_t rxread_ok_cnt = 0;
+        rxread_ok_cnt++;
+        if (rxread_ok_cnt <= 40U)
+        {
+          DebugUART_Print("[RXREAD] OK cnt=%lu p=%p len=%u tot_len=%u ref=%u payload=%p\r\n",
+                          (unsigned long)rxread_ok_cnt,
+                          (void *)p,
+                          (unsigned)p->len,
+                          (unsigned)p->tot_len,
+                          (unsigned)p->ref,
+                          p->payload);
+        }
+
+        log_if_arp_for_me(p, netif);
+      }
+      else
+      {
+        static uint32_t rxread_null_cnt = 0;
+        rxread_null_cnt++;
+        if (rxread_null_cnt <= 20U)
+        {
+          DebugUART_Print("[RXREAD] HAL_OK but p==NULL cnt=%lu\r\n",
+                          (unsigned long)rxread_null_cnt);
+        }
+      }
+    }
+    else
+    {
+      static uint32_t rxread_fail_cnt = 0;
+      rxread_fail_cnt++;
+      if (rxread_fail_cnt <= 40U)
+      {
+        DebugUART_Print("[RXREAD] HAL_ETH_ReadData FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX DMACSR=0x%08lX\r\n",
+                        (int)st,
+                        (unsigned long)HAL_ETH_GetError(&heth),
+                        (unsigned long)HAL_ETH_GetDMAError(&heth),
+                        (unsigned long)ETH->DMACSR);
+      }
     }
   }
 
@@ -875,15 +955,29 @@ void ethernetif_input(void* argument)
         p = low_level_input(netif);
         if (p != NULL)
         {
-        /*
-          DebugUART_Print("[RX->LWIP] pass packet tot_len=%u len=%u payload=%p\r\n",
-                          (unsigned)p->tot_len,
-                          (unsigned)p->len,
-                          p->payload);
-         */
+          int arp_for_me = is_arp_for_me(p, netif);
+
+          if (arp_for_me)
+          {
+            static uint32_t arp_dump_cnt = 0;
+            if (arp_dump_cnt < 10U)
+            {
+              arp_dump_cnt++;
+              dump_arp_packet(p, netif);
+            }
+          }
+
           err_t in_err = netif->input(p, netif);
 
-          //DebugUART_Print("[RX->LWIP] netif->input returned %d\r\n", (int)in_err);
+          if (arp_for_me)
+          {
+            static uint32_t arp_input_log_cnt = 0;
+            if (arp_input_log_cnt < 20U)
+            {
+              arp_input_log_cnt++;
+              DebugUART_Print("[RX->LWIP] ARP-for-me netif->input = %d\r\n", (int)in_err);
+            }
+          }
 
           if (in_err != ERR_OK)
           {
@@ -983,10 +1077,21 @@ err_t ethernetif_init(struct netif *netif)
 void pbuf_free_custom(struct pbuf *p)
 {
   struct pbuf_custom* custom_pbuf = (struct pbuf_custom*)p;
-  LWIP_MEMPOOL_FREE(RX_POOL, custom_pbuf);
 
-  /* If the Rx Buffer Pool was exhausted, signal the ethernetif_input task to
-   * call HAL_ETH_GetRxDataBuffer to rebuild the Rx descriptors. */
+  static uint32_t rx_free_cnt = 0;
+  rx_free_cnt++;
+
+  if (rx_free_cnt <= 40U)
+  {
+    DebugUART_Print("[RXFREE] cnt=%lu p=%p ref=%u len=%u tot_len=%u\r\n",
+                    (unsigned long)rx_free_cnt,
+                    (void *)p,
+                    (unsigned)p->ref,
+                    (unsigned)p->len,
+                    (unsigned)p->tot_len);
+  }
+
+  LWIP_MEMPOOL_FREE(RX_POOL, custom_pbuf);
 
   if (RxAllocStatus == RX_ALLOC_ERROR)
   {
@@ -1232,34 +1337,33 @@ void ethernet_link_thread(void* argument)
 void HAL_ETH_RxAllocateCallback(uint8_t **buff)
 {
   struct pbuf_custom *p = LWIP_MEMPOOL_ALLOC(RX_POOL);
-  static uint32_t dbg_alloc_cnt = 0;  //просто счетчик для вывода
+  static uint32_t dbg_alloc_cnt = 0;
 
   if (p)
   {
     uint8_t *base = (uint8_t *)p + offsetof(RxBuff_t, buff);
 
-    /* DMA пишет кадр с отступом 2 байта, чтобы lwIP потом работал с выровненным payload */
     *buff = base + ETH_PAD_SIZE;
-
-    /*
-
-    if (dbg_alloc_cnt < 8)
-    {
-          DebugUART_Print("[RXALLOC] p=%p buff=%p off=%lu\r\n",
-                          (void*)p,
-                          (void*)*buff,
-                          (unsigned long)offsetof(RxBuff_t, buff));
-          dbg_alloc_cnt++;
-     }
-    */
 
     p->custom_free_function = pbuf_free_custom;
     pbuf_alloced_custom(PBUF_RAW, 0, PBUF_REF, p, *buff, ETH_RX_BUFFER_SIZE);
+
+    dbg_alloc_cnt++;
+    if (dbg_alloc_cnt <= 40U)
+    {
+      DebugUART_Print("[RXALLOC] OK cnt=%lu p=%p buff=%p base=%p ref=%u\r\n",
+                      (unsigned long)dbg_alloc_cnt,
+                      (void *)p,
+                      (void *)*buff,
+                      (void *)base,
+                      (unsigned)((struct pbuf *)p)->ref);
+    }
   }
   else
   {
     RxAllocStatus = RX_ALLOC_ERROR;
     *buff = NULL;
+    DebugUART_Print("[RXALLOC] FAIL: RX_POOL exhausted\r\n");
   }
 }
 
@@ -1290,18 +1394,30 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t 
     p->tot_len += Length;
   }
 
-  invalidate_dcache_range(buff, Length);
+  invalidate_dcache_range((void *)(buff - ETH_PAD_SIZE), Length + ETH_PAD_SIZE);
 }
 
-void HAL_ETH_TxFreeCallback(uint32_t * buff)
+void HAL_ETH_TxFreeCallback(uint32_t *buff)
 {
-/* USER CODE BEGIN HAL ETH TxFreeCallback */
+  DebugUART_Print("[TX] HAL_ETH_TxFreeCallback ENTER buff=%p\r\n", (void *)buff);
 
-  pbuf_free((struct pbuf *)buff);
+  if (buff != NULL)
+  {
+    struct pbuf *p = (struct pbuf *)buff;
 
-/* USER CODE END HAL ETH TxFreeCallback */
+    DebugUART_Print("[TX] HAL_ETH_TxFreeCallback pbuf=%p ref_before=%u len=%u tot_len=%u\r\n",
+                    (void *)p,
+                    (unsigned)p->ref,
+                    (unsigned)p->len,
+                    (unsigned)p->tot_len);
+
+    pbuf_free(p);
+
+    DebugUART_Print("[TX] HAL_ETH_TxFreeCallback pbuf_free DONE\r\n");
+  }
+
+  DebugUART_Print("[TX] HAL_ETH_TxFreeCallback EXIT\r\n");
 }
-
 /* USER CODE BEGIN 8 */
 
 /* USER CODE END 8 */

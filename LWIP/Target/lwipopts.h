@@ -80,7 +80,7 @@ extern uint8_t __lwip_heap_end__;
 /*----- Value in opt.h for TCPIP_THREAD_PRIO: 1 -----*/
 #define TCPIP_THREAD_PRIO ((osPriority_t)osPriorityAboveNormal)
 /*----- Value in opt.h for TCPIP_MBOX_SIZE: 0 -----*/
-#define TCPIP_MBOX_SIZE 6
+#define TCPIP_MBOX_SIZE 32
 /*----- Value in opt.h for SLIPIF_THREAD_STACKSIZE: 0 -----*/
 #define SLIPIF_THREAD_STACKSIZE 1024
 /*----- Value in opt.h for SLIPIF_THREAD_PRIO: 1 -----*/
@@ -90,11 +90,11 @@ extern uint8_t __lwip_heap_end__;
 /*----- Value in opt.h for DEFAULT_THREAD_PRIO: 1 -----*/
 #define DEFAULT_THREAD_PRIO 3
 /*----- Value in opt.h for DEFAULT_UDP_RECVMBOX_SIZE: 0 -----*/
-#define DEFAULT_UDP_RECVMBOX_SIZE 6
+#define DEFAULT_UDP_RECVMBOX_SIZE 16
 /*----- Value in opt.h for DEFAULT_TCP_RECVMBOX_SIZE: 0 -----*/
-#define DEFAULT_TCP_RECVMBOX_SIZE 6
+#define DEFAULT_TCP_RECVMBOX_SIZE 16
 /*----- Value in opt.h for DEFAULT_ACCEPTMBOX_SIZE: 0 -----*/
-#define DEFAULT_ACCEPTMBOX_SIZE 6
+#define DEFAULT_ACCEPTMBOX_SIZE 8
 /*----- Value in opt.h for RECV_BUFSIZE_DEFAULT: INT_MAX -----*/
 #define RECV_BUFSIZE_DEFAULT 2000000000
 /*----- Value in opt.h for LWIP_STATS: 1 -----*/
@@ -117,6 +117,7 @@ extern uint8_t __lwip_heap_end__;
 #define CHECKSUM_CHECK_ICMP6 0
 /*-----------------------------------------------------------------------------*/
  /* USER CODE BEGIN 1 */
+#define MEMP_NUM_TCPIP_MSG_INPKT   32
 
  /* Alignment padding for Ethernet frames (recommended on Cortex-M7) */
  #define ETH_PAD_SIZE 2
