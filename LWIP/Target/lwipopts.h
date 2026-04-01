@@ -117,12 +117,13 @@ extern uint8_t __lwip_heap_end__;
 #define CHECKSUM_CHECK_ICMP6 0
 /*-----------------------------------------------------------------------------*/
  /* USER CODE BEGIN 1 */
-#define MEMP_NUM_TCPIP_MSG_INPKT   32
+
+ #define MEMP_NUM_TCPIP_MSG_INPKT   32
 
  /* Alignment padding for Ethernet frames (recommended on Cortex-M7) */
  #define ETH_PAD_SIZE 2
 
- /* ===== Static IPv4 (у тебя уже есть) ===== */
+ /* ===== Static IPv4 ===== */
  #define IP_ADDR0   10
  #define IP_ADDR1   0
  #define IP_ADDR2   0
@@ -138,35 +139,45 @@ extern uint8_t __lwip_heap_end__;
  #define GW_ADDR2   0
  #define GW_ADDR3   1
 
- /* ===== IMPORTANT: TCP + RAW server resources ===== */
- #define LWIP_TCP                1
+ /* ===== Core features ===== */
+ #define LWIP_ARP                 1
+ #define LWIP_ETHERNET            1
+ #define LWIP_RAW                 1
+ #define LWIP_TCP                 1
+ #define LWIP_ICMP                1
 
- /* если будешь использовать netconn/sockets в будущем — включишь, но для RAW не нужно */
- #define LWIP_NETCONN            0
- #define LWIP_SOCKET             0
+ /* raw API only */
+ #define LWIP_NETCONN             0
+ #define LWIP_SOCKET              0
 
- /* TCP pools (чтобы хватало ресурсов для listen/seg и т.п.) */
- #define MEMP_NUM_TCP_PCB        10
- #define MEMP_NUM_TCP_PCB_LISTEN 6
- #define MEMP_NUM_TCP_SEG        32
+ /* TCP resources */
+ #define MEMP_NUM_TCP_PCB         10
+ #define MEMP_NUM_TCP_PCB_LISTEN  6
+ #define MEMP_NUM_TCP_SEG         32
 
- /* чуть безопаснее по буферам */
- #define TCP_MSS                 1460
- #define TCP_SND_BUF             (4 * TCP_MSS)
- #define TCP_WND                 (4 * TCP_MSS)
+ #define TCP_MSS                  1460
+ #define TCP_SND_BUF              (4 * TCP_MSS)
+ #define TCP_WND                  (4 * TCP_MSS)
 
- /* ===== lwIP debug to track SYN/ACK/ARP ===== */
+ /* ARP settings */
+ #define ARP_TABLE_SIZE           10
+ #define ARP_QUEUEING             0
+
+ /* netif callbacks */
+ #define LWIP_NETIF_LINK_CALLBACK   1
+ #define LWIP_NETIF_STATUS_CALLBACK 1
+
+ /* ===== Debug ===== */
  #define LWIP_DEBUG 0
  #define LWIP_DBG_TYPES_ON (LWIP_DBG_ON | LWIP_DBG_LEVEL_ALL)
 
- /*
- #define TCP_DEBUG  LWIP_DBG_ON
- #define IP_DEBUG   LWIP_DBG_ON
- #define ETHARP_DEBUG LWIP_DBG_ON
- #define NETIF_DEBUG LWIP_DBG_ON
- */
+#define ETHARP_DEBUG   LWIP_DBG_OFF
+#define NETIF_DEBUG    LWIP_DBG_OFF
+#define IP_DEBUG       LWIP_DBG_OFF
+#define PBUF_DEBUG     LWIP_DBG_OFF
+#define TCPIP_DEBUG    LWIP_DBG_OFF
 
- /* --- Debug output redirection (no redefinition warnings) --- */
+ /* --- Debug output redirection --- */
  #ifndef LWIP_PLATFORM_DIAG
  #define LWIP_PLATFORM_DIAG(x) do { DebugUART_Print x; } while(0)
  #endif

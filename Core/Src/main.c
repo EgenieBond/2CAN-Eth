@@ -328,6 +328,12 @@ void StartDefaultTask(void *argument)
 
   DebugUART_InitMutex();
 
+  SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
+  __DSB();
+  __ISB();
+
+  DebugUART_Print("[CPU] CCR before LWIP = 0x%08lX\r\n", SCB->CCR);
+
   /* init lwIP */
   MX_LWIP_Init();
   DebugUART_Print("[HEAP] free after LWIP init: %lu\r\n", (uint32_t)xPortGetFreeHeapSize());

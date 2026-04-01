@@ -79,7 +79,8 @@ void MX_LWIP_Init(void)
             &ethernetif_init,
             &tcpip_input);
 
-  DebugUART_Print("[LWIP] gnetif added\r\n");
+  //DebugUART_Print("[LWIP] gnetif added\r\n");
+  DebugUART_Print("[LWIP] netif_add done, input=%p\r\n", (void*)gnetif.input);
 
   /* Make it default */
   netif_set_default(&gnetif);

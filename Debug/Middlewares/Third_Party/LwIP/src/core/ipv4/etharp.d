@@ -1,5 +1,6 @@
 Middlewares/Third_Party/LwIP/src/core/ipv4/etharp.o: \
  ../Middlewares/Third_Party/LwIP/src/core/ipv4/etharp.c \
+ ../Core/Inc/debug_uart.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/opt.h \
  ../LWIP/Target/lwipopts.h ../Core/Inc/main.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
@@ -63,6 +64,7 @@ Middlewares/Third_Party/LwIP/src/core/ipv4/etharp.o: \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/autoip.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/iana.h \
  ../Middlewares/Third_Party/LwIP/src/include/netif/ethernet.h
+../Core/Inc/debug_uart.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/opt.h:
 ../LWIP/Target/lwipopts.h:
 ../Core/Inc/main.h:
