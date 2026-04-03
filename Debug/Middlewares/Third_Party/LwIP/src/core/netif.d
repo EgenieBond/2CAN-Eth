@@ -66,6 +66,7 @@ Middlewares/Third_Party/LwIP/src/core/netif.o: \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/udp.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/udp.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/priv/raw_priv.h \
+ ../Middlewares/Third_Party/LwIP/src/include/lwip/raw.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/snmp.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/igmp.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/etharp.h \
@@ -153,6 +154,7 @@ Middlewares/Third_Party/LwIP/src/core/netif.o: \
 ../Middlewares/Third_Party/LwIP/src/include/lwip/udp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/udp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/priv/raw_priv.h:
+../Middlewares/Third_Party/LwIP/src/include/lwip/raw.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/snmp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/igmp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/etharp.h:

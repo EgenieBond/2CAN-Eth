@@ -62,36 +62,43 @@ osThreadAttr_t attributes;
   */
 void MX_LWIP_Init(void)
 {
-  /* IP addresses initialization */
-	IP4_ADDR(&ipaddr, 10, 0, 0, 100);
-	IP4_ADDR(&netmask, 255, 255, 255, 0);
-	IP4_ADDR(&gw, 0, 0, 0, 0);
+  /* IPv4 static config */
+  IP4_ADDR(&ipaddr,  IP_ADDR0,  IP_ADDR1,  IP_ADDR2,  IP_ADDR3);
+  IP4_ADDR(&netmask, NETMASK_ADDR0, NETMASK_ADDR1, NETMASK_ADDR2, NETMASK_ADDR3);
+  IP4_ADDR(&gw,      GW_ADDR0, GW_ADDR1, GW_ADDR2, GW_ADDR3);
 
-/* USER CODE BEGIN IP_ADDRESSES */
-/* USER CODE END IP_ADDRESSES */
+  /* Init TCP/IP stack */
+  tcpip_init(NULL, NULL);
 
-  /* Initialize the LwIP stack with RTOS */
-  tcpip_init( NULL, NULL );
+  /* Add network interface */
+  netif_add(&gnetif,
+            &ipaddr,
+            &netmask,
+            &gw,
+            NULL,
+            &ethernetif_init,
+            &tcpip_input);
 
-  /* IP addresses initialization without DHCP (IPv4) */
-  //IP4_ADDR(&ipaddr, IP_ADDRESS[0], IP_ADDRESS[1], IP_ADDRESS[2], IP_ADDRESS[3]);
-  //IP4_ADDR(&netmask, NETMASK_ADDRESS[0], NETMASK_ADDRESS[1] , NETMASK_ADDRESS[2], NETMASK_ADDRESS[3]);
-  //IP4_ADDR(&gw, GATEWAY_ADDRESS[0], GATEWAY_ADDRESS[1], GATEWAY_ADDRESS[2], GATEWAY_ADDRESS[3]);
+  //DebugUART_Print("[LWIP] gnetif added\r\n");
+  DebugUART_Print("[LWIP] netif_add done, input=%p\r\n", (void*)gnetif.input);
 
-  /* add the network interface (IPv4/IPv6) with RTOS */
-  netif_add(&gnetif, &ipaddr, &netmask, &gw, NULL, &ethernetif_init, &tcpip_input);
-
-  /* Registers the default network interface */
+  /* Make it default */
   netif_set_default(&gnetif);
+  DebugUART_Print("[LWIP] netif_set_default done\r\n");
 
-  /* We must always bring the network interface up connection or not... */
-  netif_set_up(&gnetif);
+  /*
+   * IMPORTANT:
+   * Do NOT force netif UP here unconditionally.
+   * Real link state is controlled by ethernet_link_thread().
+   */
+  netif_set_down(&gnetif);
+  netif_set_link_down(&gnetif);
+  DebugUART_Print("[LWIP] netif forced DOWN initially\r\n");
 
-  /* Set the link callback function, this function is called on change of link status*/
+  /* Link/status callback */
   netif_set_link_callback(&gnetif, ethernet_link_status_updated);
 
-  /* Create the Ethernet link handler thread */
-/* USER CODE BEGIN H7_OS_THREAD_NEW_CMSIS_RTOS_V2 */
+  /* Create Ethernet link handler thread */
   memset(&attributes, 0x0, sizeof(osThreadAttr_t));
   attributes.name = "EthLink";
   attributes.stack_size = INTERFACE_THREAD_STACK_SIZE;
@@ -99,15 +106,24 @@ void MX_LWIP_Init(void)
   osThreadNew(ethernet_link_thread, &gnetif, &attributes);
 
   DebugUART_Print("[LWIP] Ethernet link thread created\r\n");
-/* USER CODE END H7_OS_THREAD_NEW_CMSIS_RTOS_V2 */
 
-  /* USER CODE BEGIN 3 */
   DebugUART_Print("[LWIP] IP: %d.%d.%d.%d\r\n",
                   ip4_addr1(netif_ip4_addr(&gnetif)),
                   ip4_addr2(netif_ip4_addr(&gnetif)),
                   ip4_addr3(netif_ip4_addr(&gnetif)),
                   ip4_addr4(netif_ip4_addr(&gnetif)));
-  /* USER CODE END 3 */
+
+  DebugUART_Print("[LWIP] NETMASK: %d.%d.%d.%d\r\n",
+                  ip4_addr1(netif_ip4_netmask(&gnetif)),
+                  ip4_addr2(netif_ip4_netmask(&gnetif)),
+                  ip4_addr3(netif_ip4_netmask(&gnetif)),
+                  ip4_addr4(netif_ip4_netmask(&gnetif)));
+
+  DebugUART_Print("[LWIP] GW: %d.%d.%d.%d\r\n",
+                  ip4_addr1(netif_ip4_gw(&gnetif)),
+                  ip4_addr2(netif_ip4_gw(&gnetif)),
+                  ip4_addr3(netif_ip4_gw(&gnetif)),
+                  ip4_addr4(netif_ip4_gw(&gnetif)));
 }
 
 #ifdef USE_OBSOLETE_USER_CODE_SECTION_4

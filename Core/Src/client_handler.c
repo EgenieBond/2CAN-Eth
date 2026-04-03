@@ -11,6 +11,7 @@
 #include "debug_uart.h"
 #include "fake_client_source.h"
 #include <string.h>
+#include "raw_tcp_server.h"
 
 #define CLIENT_RX_BUFFER_SIZE 128
 
@@ -20,7 +21,7 @@ static char  rx_line_buf[CLIENT_RX_BUFFER_SIZE];
 static size_t rx_line_pos = 0;
 
 /* Временный режим: fake source включён */
-#define CLIENT_USE_FAKE_SOURCE 1
+#define CLIENT_USE_FAKE_SOURCE 0
 
 static void ClientHandler_SendCmdToCore(const char *cmd)
 {
@@ -117,7 +118,8 @@ void ClientHandler_PollTx(void)
 #if CLIENT_USE_FAKE_SOURCE
         DebugUART_Print("[CLIENT] TX->FAKE_CLIENT: %s\r\n", resp.data);
 #else
-        DebugUART_Print("[CLIENT] TX->TCP: %s\r\n", resp.data);
+        int send_rc = RawTcpServer_SendAsync((const uint8_t *)resp.data, strlen(resp.data));
+        DebugUART_Print("[CLIENT] TX->TCP async rc=%d\r\n", send_rc);
 #endif
     }
 }

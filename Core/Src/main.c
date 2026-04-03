@@ -20,6 +20,8 @@
 #include "eth_app.h"
 #include "core_task.h"
 #include "can_task.h"
+
+extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -86,6 +88,13 @@ int main(void)
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* ВРЕМЕННЫЙ ТЕСТ:
+     полностью отключаем D-Cache, чтобы исключить cache-related баги Ethernet DMA */
+  SCB_DisableDCache();
+  __DSB();
+  __ISB();
+
   /* === FIX: disable unaligned access trap (temporary) ===
      If UNALIGN_TRP is enabled, any unaligned word access triggers UsageFault.
      We'll disable it to stop HardFault while we fix stack/alignment issues.
@@ -328,6 +337,12 @@ void StartDefaultTask(void *argument)
 
   DebugUART_InitMutex();
 
+  SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
+  __DSB();
+  __ISB();
+
+  DebugUART_Print("[CPU] CCR before LWIP = 0x%08lX\r\n", SCB->CCR);
+
   /* init lwIP */
   MX_LWIP_Init();
   DebugUART_Print("[HEAP] free after LWIP init: %lu\r\n", (uint32_t)xPortGetFreeHeapSize());
@@ -335,12 +350,13 @@ void StartDefaultTask(void *argument)
   DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
   /* ВКЛЮЧАЕМ внутренний pipeline */
-  EthApp_Init();
-  CoreTask_Start();
-  CanTask_Start();
+  //EthApp_Init();
+  //CoreTask_Start();
+  //CanTask_Start();
 
   /* start EthernetTask */
   EthernetTask_Start();
+  ETH_DebugPrintCounters("AFTER_ETH_TASK_START");
 
   for (;;)
   {
@@ -407,7 +423,7 @@ void MPU_Config(void)
 
   /* Включаем кеши (после MPU!) */
   SCB_EnableICache();
-  SCB_EnableDCache();
+  /* SCB_EnableDCache(); */   /* временно выключено для отладки Ethernet */
   __DSB();
   __ISB();
 }
