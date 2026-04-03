@@ -1,2 +1,2 @@
-../Middlewares/Third_Party/LwIP/src/netif/ethernet.c:82:1:ethernet_input	120	static
-../Middlewares/Third_Party/LwIP/src/netif/ethernet.c:325:1:ethernet_output	32	static
+../Middlewares/Third_Party/LwIP/src/netif/ethernet.c:82:1:ethernet_input	32	static
+../Middlewares/Third_Party/LwIP/src/netif/ethernet.c:248:1:ethernet_output	32	static

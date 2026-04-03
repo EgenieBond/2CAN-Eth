@@ -20,6 +20,8 @@
 #include "eth_app.h"
 #include "core_task.h"
 #include "can_task.h"
+
+extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -86,6 +88,13 @@ int main(void)
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* ВРЕМЕННЫЙ ТЕСТ:
+     полностью отключаем D-Cache, чтобы исключить cache-related баги Ethernet DMA */
+  SCB_DisableDCache();
+  __DSB();
+  __ISB();
+
   /* === FIX: disable unaligned access trap (temporary) ===
      If UNALIGN_TRP is enabled, any unaligned word access triggers UsageFault.
      We'll disable it to stop HardFault while we fix stack/alignment issues.
@@ -347,6 +356,7 @@ void StartDefaultTask(void *argument)
 
   /* start EthernetTask */
   EthernetTask_Start();
+  ETH_DebugPrintCounters("AFTER_ETH_TASK_START");
 
   for (;;)
   {
@@ -413,7 +423,7 @@ void MPU_Config(void)
 
   /* Включаем кеши (после MPU!) */
   SCB_EnableICache();
-  SCB_EnableDCache();
+  /* SCB_EnableDCache(); */   /* временно выключено для отладки Ethernet */
   __DSB();
   __ISB();
 }

@@ -209,15 +209,12 @@ void DebugMon_Handler(void)
 /**
   * @brief This function handles Ethernet global interrupt.
   */
+extern volatile uint32_t g_eth_irq_handler_cnt;
+
 void ETH_IRQHandler(void)
 {
-  /* USER CODE BEGIN ETH_IRQn 0 */
-
-  /* USER CODE END ETH_IRQn 0 */
+  g_eth_irq_handler_cnt++;
   HAL_ETH_IRQHandler(&heth);
-  /* USER CODE BEGIN ETH_IRQn 1 */
-
-  /* USER CODE END ETH_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */

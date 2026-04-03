@@ -652,31 +652,10 @@ etharp_input(struct pbuf *p, struct netif *netif)
 
   hdr = (struct etharp_hdr *)p->payload;
 
-  DebugUART_Print("[ETHARP] input ENTER p=%p len=%u tot=%u payload=%p netif=%p\r\n",
-                  (void *)p,
-                  (unsigned)p->len,
-                  (unsigned)p->tot_len,
-                  p->payload,
-                  (void *)netif);
-
-  DebugUART_Print("[ETHARP] hdr raw: hwtype=0x%04X proto=0x%04X hwlen=%u protolen=%u opcode=0x%04X\r\n",
-                  (unsigned)lwip_ntohs(hdr->hwtype),
-                  (unsigned)lwip_ntohs(hdr->proto),
-                  (unsigned)hdr->hwlen,
-                  (unsigned)hdr->protolen,
-                  (unsigned)lwip_ntohs(hdr->opcode));
-
-  /* RFC 826 "Packet Reception" */
   if ((hdr->hwtype != PP_HTONS(LWIP_IANA_HWTYPE_ETHERNET)) ||
       (hdr->hwlen != ETH_HWADDR_LEN) ||
       (hdr->protolen != sizeof(ip4_addr_t)) ||
       (hdr->proto != PP_HTONS(ETHTYPE_IP)))  {
-
-    DebugUART_Print("[ETHARP] DROP bad header: hwtype=0x%04X proto=0x%04X hwlen=%u protolen=%u\r\n",
-                    (unsigned)lwip_ntohs(hdr->hwtype),
-                    (unsigned)lwip_ntohs(hdr->proto),
-                    (unsigned)hdr->hwlen,
-                    (unsigned)hdr->protolen);
 
     ETHARP_STATS_INC(etharp.proterr);
     ETHARP_STATS_INC(etharp.drop);
@@ -693,76 +672,38 @@ etharp_input(struct pbuf *p, struct netif *netif)
   IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(&sipaddr, &hdr->sipaddr);
   IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(&dipaddr, &hdr->dipaddr);
 
-  DebugUART_Print("[ETHARP] parsed: SIP=%u.%u.%u.%u DIP=%u.%u.%u.%u myIP=%u.%u.%u.%u\r\n",
-                  ip4_addr1(&sipaddr), ip4_addr2(&sipaddr), ip4_addr3(&sipaddr), ip4_addr4(&sipaddr),
-                  ip4_addr1(&dipaddr), ip4_addr2(&dipaddr), ip4_addr3(&dipaddr), ip4_addr4(&dipaddr),
-                  ip4_addr1(netif_ip4_addr(netif)), ip4_addr2(netif_ip4_addr(netif)),
-                  ip4_addr3(netif_ip4_addr(netif)), ip4_addr4(netif_ip4_addr(netif)));
-
-  DebugUART_Print("[ETHARP] shwaddr=%02X:%02X:%02X:%02X:%02X:%02X dhwaddr=%02X:%02X:%02X:%02X:%02X:%02X\r\n",
-                  hdr->shwaddr.addr[0], hdr->shwaddr.addr[1], hdr->shwaddr.addr[2],
-                  hdr->shwaddr.addr[3], hdr->shwaddr.addr[4], hdr->shwaddr.addr[5],
-                  hdr->dhwaddr.addr[0], hdr->dhwaddr.addr[1], hdr->dhwaddr.addr[2],
-                  hdr->dhwaddr.addr[3], hdr->dhwaddr.addr[4], hdr->dhwaddr.addr[5]);
-
   if (ip4_addr_isany_val(*netif_ip4_addr(netif))) {
     for_us = 0;
-    DebugUART_Print("[ETHARP] netif IP is ANY -> for_us=0\r\n");
   } else {
     for_us = (u8_t)ip4_addr_cmp(&dipaddr, netif_ip4_addr(netif));
-    DebugUART_Print("[ETHARP] for_us=%u\r\n", (unsigned)for_us);
   }
 
-  DebugUART_Print("[ETHARP] update ARP cache: for_us=%u\r\n", (unsigned)for_us);
   etharp_update_arp_entry(netif, &sipaddr, &(hdr->shwaddr),
                           for_us ? ETHARP_FLAG_TRY_HARD : ETHARP_FLAG_FIND_ONLY);
 
   switch (hdr->opcode) {
     case PP_HTONS(ARP_REQUEST):
-      DebugUART_Print("[ETHARP] opcode=ARP_REQUEST\r\n");
-
       if (for_us) {
-        DebugUART_Print("[ETHARP] ARP request IS FOR US -> sending reply\r\n");
-        DebugUART_Print("[ETHARP] reply params: srcMAC=%02X:%02X:%02X:%02X:%02X:%02X dstMAC=%02X:%02X:%02X:%02X:%02X:%02X srcIP=%u.%u.%u.%u dstIP=%u.%u.%u.%u\r\n",
-                        netif->hwaddr[0], netif->hwaddr[1], netif->hwaddr[2],
-                        netif->hwaddr[3], netif->hwaddr[4], netif->hwaddr[5],
-                        hdr->shwaddr.addr[0], hdr->shwaddr.addr[1], hdr->shwaddr.addr[2],
-                        hdr->shwaddr.addr[3], hdr->shwaddr.addr[4], hdr->shwaddr.addr[5],
-                        ip4_addr1(netif_ip4_addr(netif)), ip4_addr2(netif_ip4_addr(netif)),
-                        ip4_addr3(netif_ip4_addr(netif)), ip4_addr4(netif_ip4_addr(netif)),
-                        ip4_addr1(&sipaddr), ip4_addr2(&sipaddr), ip4_addr3(&sipaddr), ip4_addr4(&sipaddr));
-
         etharp_raw(netif,
                    (struct eth_addr *)netif->hwaddr, &hdr->shwaddr,
                    (struct eth_addr *)netif->hwaddr, netif_ip4_addr(netif),
                    &hdr->shwaddr, &sipaddr,
                    ARP_REPLY);
-
-        DebugUART_Print("[ETHARP] etharp_raw(ARP_REPLY) returned to caller\r\n");
-      } else if (ip4_addr_isany_val(*netif_ip4_addr(netif))) {
-        DebugUART_Print("[ETHARP] ARP request ignored: netif IP is ANY\r\n");
-      } else {
-        DebugUART_Print("[ETHARP] ARP request not for us\r\n");
       }
       break;
 
     case PP_HTONS(ARP_REPLY):
-      DebugUART_Print("[ETHARP] opcode=ARP_REPLY\r\n");
 #if (LWIP_DHCP && DHCP_DOES_ARP_CHECK)
       dhcp_arp_reply(netif, &sipaddr);
 #endif /* (LWIP_DHCP && DHCP_DOES_ARP_CHECK) */
       break;
 
     default:
-      DebugUART_Print("[ETHARP] opcode=UNKNOWN 0x%04X\r\n",
-                      (unsigned)lwip_ntohs(hdr->opcode));
       ETHARP_STATS_INC(etharp.err);
       break;
   }
 
-  DebugUART_Print("[ETHARP] freeing incoming ARP pbuf=%p\r\n", (void *)p);
   pbuf_free(p);
-  DebugUART_Print("[ETHARP] input EXIT\r\n");
 }
 
 /** Just a small helper function that sends a pbuf to an ethernet address
@@ -1134,41 +1075,11 @@ etharp_raw(struct netif *netif, const struct eth_addr *ethsrc_addr,
 
   LWIP_ASSERT("netif != NULL", netif != NULL);
 
-  DebugUART_Print("[ETHARP-RAW] ENTER opcode=%u netif=%p\r\n",
-                  (unsigned)opcode,
-                  (void *)netif);
-
-  DebugUART_Print("[ETHARP-RAW] ethsrc=%02X:%02X:%02X:%02X:%02X:%02X ethdst=%02X:%02X:%02X:%02X:%02X:%02X\r\n",
-                  ethsrc_addr->addr[0], ethsrc_addr->addr[1], ethsrc_addr->addr[2],
-                  ethsrc_addr->addr[3], ethsrc_addr->addr[4], ethsrc_addr->addr[5],
-                  ethdst_addr->addr[0], ethdst_addr->addr[1], ethdst_addr->addr[2],
-                  ethdst_addr->addr[3], ethdst_addr->addr[4], ethdst_addr->addr[5]);
-
-  DebugUART_Print("[ETHARP-RAW] hwsrc=%02X:%02X:%02X:%02X:%02X:%02X hwdst=%02X:%02X:%02X:%02X:%02X:%02X\r\n",
-                  hwsrc_addr->addr[0], hwsrc_addr->addr[1], hwsrc_addr->addr[2],
-                  hwsrc_addr->addr[3], hwsrc_addr->addr[4], hwsrc_addr->addr[5],
-                  hwdst_addr->addr[0], hwdst_addr->addr[1], hwdst_addr->addr[2],
-                  hwdst_addr->addr[3], hwdst_addr->addr[4], hwdst_addr->addr[5]);
-
-  DebugUART_Print("[ETHARP-RAW] ipsrc=%u.%u.%u.%u ipdst=%u.%u.%u.%u\r\n",
-                  ip4_addr1(ipsrc_addr), ip4_addr2(ipsrc_addr),
-                  ip4_addr3(ipsrc_addr), ip4_addr4(ipsrc_addr),
-                  ip4_addr1(ipdst_addr), ip4_addr2(ipdst_addr),
-                  ip4_addr3(ipdst_addr), ip4_addr4(ipdst_addr));
-
-  /* allocate a pbuf for the outgoing ARP request/reply packet */
   p = pbuf_alloc(PBUF_LINK, SIZEOF_ETHARP_HDR, PBUF_RAM);
   if (p == NULL) {
-    DebugUART_Print("[ETHARP-RAW] pbuf_alloc FAILED\r\n");
     ETHARP_STATS_INC(etharp.memerr);
     return ERR_MEM;
   }
-
-  DebugUART_Print("[ETHARP-RAW] pbuf_alloc OK p=%p len=%u tot_len=%u payload=%p\r\n",
-                  (void *)p,
-                  (unsigned)p->len,
-                  (unsigned)p->tot_len,
-                  p->payload);
 
   LWIP_ASSERT("check that first pbuf can hold struct etharp_hdr",
               (p->len >= SIZEOF_ETHARP_HDR));
@@ -1190,11 +1101,8 @@ etharp_raw(struct netif *netif, const struct eth_addr *ethsrc_addr,
   hdr->hwlen = ETH_HWADDR_LEN;
   hdr->protolen = sizeof(ip4_addr_t);
 
-  DebugUART_Print("[ETHARP-RAW] calling ethernet_output p=%p\r\n", (void *)p);
-
 #if LWIP_AUTOIP
   if (ip4_addr_islinklocal(ipsrc_addr)) {
-    DebugUART_Print("[ETHARP-RAW] linklocal source -> broadcast ethernet_output\r\n");
     result = ethernet_output(netif, p, ethsrc_addr, &ethbroadcast, ETHTYPE_ARP);
   } else
 #endif /* LWIP_AUTOIP */
@@ -1202,15 +1110,11 @@ etharp_raw(struct netif *netif, const struct eth_addr *ethsrc_addr,
     result = ethernet_output(netif, p, ethsrc_addr, ethdst_addr, ETHTYPE_ARP);
   }
 
-  DebugUART_Print("[ETHARP-RAW] ethernet_output result=%d\r\n", (int)result);
-
   ETHARP_STATS_INC(etharp.xmit);
 
-  DebugUART_Print("[ETHARP-RAW] freeing tx pbuf=%p\r\n", (void *)p);
   pbuf_free(p);
   p = NULL;
 
-  DebugUART_Print("[ETHARP-RAW] EXIT result=%d\r\n", (int)result);
   return result;
 }
 
