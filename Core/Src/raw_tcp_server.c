@@ -36,8 +36,7 @@ static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
     LWIP_UNUSED_ARG(arg);
     LWIP_UNUSED_ARG(tpcb);
-
-    DebugUART_Print("[TCP] SENT cb: acked=%u bytes\r\n", (unsigned)len);
+    LWIP_UNUSED_ARG(len);
     return ERR_OK;
 }
 
@@ -142,8 +141,7 @@ static void raw_tcp_send_cb(void *arg)
     if (ctx == NULL)
         return;
 
-    int rc = RawTcpServer_Send(ctx->data, ctx->len);
-    DebugUART_Print("[TCP] Async send cb rc=%d len=%u\r\n", rc, (unsigned)ctx->len);
+    (void)RawTcpServer_Send(ctx->data, ctx->len);
 }
 
 /* ===== PUBLIC API ===== */
@@ -159,11 +157,6 @@ int RawTcpServer_HasClient(void)
  */
 int RawTcpServer_Send(const uint8_t *data, size_t len)
 {
-    DebugUART_Print("[TCP] SEND request len=%u client_pcb=%p sndbuf=%u\r\n",
-                    (unsigned)len,
-                    (void*)client_pcb,
-                    client_pcb ? (unsigned)tcp_sndbuf(client_pcb) : 0U);
-
     err_t wr;
     err_t out;
 
@@ -175,11 +168,6 @@ int RawTcpServer_Send(const uint8_t *data, size_t len)
         DebugUART_Print("[TCP] SEND skipped: no active client\r\n");
         return -2;
     }
-
-    DebugUART_Print("[TCP] client state=%d local_port=%u remote_port=%u\r\n",
-                    (int)client_pcb->state,
-                    (unsigned)client_pcb->local_port,
-                    (unsigned)client_pcb->remote_port);
 
     wr = tcp_write(client_pcb, data, (u16_t)len, TCP_WRITE_FLAG_COPY);
     if (wr != ERR_OK)
@@ -198,7 +186,6 @@ int RawTcpServer_Send(const uint8_t *data, size_t len)
         return -4;
     }
 
-    DebugUART_Print("[TCP] TX OK len=%u\r\n", (unsigned)len);
     return 0;
 }
 
@@ -231,16 +218,12 @@ int RawTcpServer_SendAsync(const uint8_t *data, size_t len)
         return -4;
     }
 
-    DebugUART_Print("[TCP] Async send scheduled len=%u\r\n", (unsigned)len);
     return 0;
 }
 
 /* ===== INIT ===== */
-
 void RawTcpServer_Init(void)
 {
-    DebugUART_Print("[TCP] RawTcpServer_Init enter\r\n");
-
     if (server_pcb != NULL)
     {
         DebugUART_Print("[TCP] previous server pcb exists\r\n");
@@ -272,6 +255,5 @@ void RawTcpServer_Init(void)
     }
 
     tcp_accept(server_pcb, tcp_server_accept);
-    DebugUART_Print("[TCP] accept callback installed, pcb=%p\r\n", (void*)server_pcb);
     DebugUART_Print("[TCP] Listening on port %d\r\n", TCP_SERVER_PORT);
 }

@@ -236,32 +236,14 @@ void ETH_DebugPrintCounters(const char *tag)
 
 void invalidate_dcache_range(void *addr, uint32_t size)
 {
-  if (addr == NULL || size == 0U) return;
-
-  uintptr_t start = (uintptr_t)addr;
-  uintptr_t end   = start + (uintptr_t)size;
-
-  /* Align to cache line boundaries */
-  start &= ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
-  end    = (end + (DCACHE_LINE_SIZE - 1U)) & ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
-
-  SCB_InvalidateDCache_by_Addr((uint32_t*)start, (int32_t)(end - start));
+  (void)addr;
+  (void)size;
 }
 
 static void clean_dcache_range(void *addr, uint32_t size)
 {
-  if ((addr == NULL) || (size == 0U))
-  {
-    return;
-  }
-
-  uintptr_t start = (uintptr_t)addr;
-  uintptr_t end   = start + (uintptr_t)size;
-
-  start &= ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
-  end    = (end + (DCACHE_LINE_SIZE - 1U)) & ~(uintptr_t)(DCACHE_LINE_SIZE - 1U);
-
-  SCB_CleanDCache_by_Addr((uint32_t *)start, (int32_t)(end - start));
+  (void)addr;
+  (void)size;
 }
 
 static void netif_link_up_in_tcpip(void *arg)
@@ -679,12 +661,6 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
   (void)handlerEth;
   g_rx_irq_cnt++;
-
-  if (g_rx_irq_cnt <= 3U)
-  {
-    ETH_DebugPrintCounters("RX_CPLT");
-  }
-
   osSemaphoreRelease(RxPktSemaphore);
 }
 
@@ -697,12 +673,6 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
   (void)handlerEth;
   g_tx_cplt_cnt++;
-
-  if (g_tx_cplt_cnt <= 3U)
-  {
-    ETH_DebugPrintCounters("TX_CPLT");
-  }
-
   osSemaphoreRelease(TxPktSemaphore);
 }
 
@@ -717,7 +687,9 @@ void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
   (void)handlerEth;
 
   g_tx_err_cnt++;
-  ETH_DebugPrintCounters("ETH_ERR");
+  DebugUART_Print("[ETH] DMA error: hal_err=0x%08lX dma_err=0x%08lX\r\n",
+                  (unsigned long)HAL_ETH_GetError(&heth),
+                  (unsigned long)dma_err);
 
   osSemaphoreRelease(TxPktSemaphore);
 
@@ -759,18 +731,19 @@ static void low_level_init(struct netif *netif)
   heth.Init.RxDesc = DMARxDscrTab;
   heth.Init.RxBuffLen = 1536;
 
-  LWIP_PLATFORM_DIAG(("[ETH] ethernetif.c BUILD TAG: AAA_1\r\n"));
-  LWIP_PLATFORM_DIAG(("[ETH] Initializing Ethernet hardware...\r\n"));
+  //LWIP_PLATFORM_DIAG(("[ETH] ethernetif.c BUILD TAG: AAA_1\r\n"));
+  //LWIP_PLATFORM_DIAG(("[ETH] Initializing Ethernet hardware...\r\n"));
   LWIP_PLATFORM_DIAG(("[ETH] MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
                       g_MACAddr[0], g_MACAddr[1], g_MACAddr[2],
                       g_MACAddr[3], g_MACAddr[4], g_MACAddr[5]));
 
   hal_eth_init_status = HAL_ETH_Init(&heth);
 
-  /* На всякий случай: если где-то MPU не применился как ожидаем,
-     чистим кэш по таблицам дескрипторов (DMA читает их напрямую). */
-  SCB_CleanDCache_by_Addr((uint32_t*)DMARxDscrTab, sizeof(DMARxDscrTab));
-  SCB_CleanDCache_by_Addr((uint32_t*)DMATxDscrTab, sizeof(DMATxDscrTab));
+  /* D-Cache сейчас выключен, поэтому cache-maintenance временно не делаем */
+    /*
+    SCB_CleanDCache_by_Addr((uint32_t*)DMARxDscrTab, sizeof(DMARxDscrTab));
+    SCB_CleanDCache_by_Addr((uint32_t*)DMATxDscrTab, sizeof(DMATxDscrTab));
+  */
 
   memset(&TxConfig, 0, sizeof(TxConfig));
   TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -931,14 +904,11 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
 
   g_low_level_output_cnt++;
 
-  debug_dump_tx_brief(p);
-
   frame_len = p->tot_len;
 
   if ((frame_len == 0U) || (frame_len > sizeof(g_TxFrame)))
   {
     g_tx_submit_fail_cnt++;
-    DebugUART_Print("[TX] invalid frame_len=%u\r\n", (unsigned)frame_len);
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE);
@@ -951,7 +921,6 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   if (pbuf_copy_partial(p, g_TxFrame, frame_len, 0) != frame_len)
   {
     g_tx_submit_fail_cnt++;
-    DebugUART_Print("[TX] pbuf_copy_partial failed len=%u\r\n", (unsigned)frame_len);
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE);
@@ -967,10 +936,6 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   g_TxBuffer.len    = tx_len;
   g_TxBuffer.next   = NULL;
 
-  /* ===== ВАЖНО =====
-   * Полностью выключаем checksum offload.
-   * Пусть lwIP сам считает IP/TCP/UDP/ICMP checksums.
-   */
   TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
   TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
   TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
@@ -988,7 +953,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   {
     g_tx_submit_fail_cnt++;
 
-    DebugUART_Print("[TX] HAL_ETH_Transmit_IT FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
+    DebugUART_Print("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
                     (int)st,
                     (unsigned long)HAL_ETH_GetError(&heth),
                     (unsigned long)HAL_ETH_GetDMAError(&heth));
@@ -1004,7 +969,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
   {
     g_tx_timeout_cnt++;
-    DebugUART_Print("[TX] timeout waiting Tx complete\r\n");
+    DebugUART_Print("[ETH] TX timeout waiting completion\r\n");
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE);
@@ -1043,32 +1008,11 @@ static struct pbuf * low_level_input(struct netif *netif)
       if (p != NULL)
       {
         g_rx_read_ok_cnt++;
-
-        debug_dump_rx_brief(p, netif);
-
-        if (is_arp_for_me(p, netif))
-        {
-          g_arp_for_me_cnt++;
-          if (g_arp_for_me_cnt <= 3U)
-          {
-            ETH_DebugPrintCounters("ARP_FOR_ME");
-          }
-        }
-
-        if (g_rx_read_ok_cnt <= 3U)
-        {
-          ETH_DebugPrintCounters("RX_OK");
-        }
       }
     }
     else
     {
       g_rx_read_fail_cnt++;
-
-      if (g_rx_read_fail_cnt <= 3U)
-      {
-        ETH_DebugPrintCounters("RX_FAIL");
-      }
     }
   }
 
@@ -1163,35 +1107,7 @@ err_t ethernetif_init(struct netif *netif)
 
   netif->linkoutput = low_level_output;
 
-  DebugUART_Print("[ETHINIT] before low_level_init\r\n");
-  DebugUART_Print("[ETHINIT] netif=%p input=%p output=%p linkoutput=%p flags=0x%02X\r\n",
-                  (void *)netif,
-                  (void *)netif->input,
-                  (void *)netif->output,
-                  (void *)netif->linkoutput,
-                  (unsigned)netif->flags);
-
   low_level_init(netif);
-
-  DebugUART_Print("[ETHINIT] after low_level_init\r\n");
-  DebugUART_Print("[ETHINIT] netif=%p input=%p output=%p linkoutput=%p flags=0x%02X\r\n",
-                  (void *)netif,
-                  (void *)netif->input,
-                  (void *)netif->output,
-                  (void *)netif->linkoutput,
-                  (unsigned)netif->flags);
-
-#if LWIP_ARP
-  DebugUART_Print("[ETHINIT] LWIP_ARP=1, output=etharp_output expected\r\n");
-#else
-  DebugUART_Print("[ETHINIT] WARNING: LWIP_ARP=0\r\n");
-#endif
-
-  DebugUART_Print("[ETHINIT] netif->input=%p netif->output=%p netif->linkoutput=%p flags=0x%02X\r\n",
-                  (void *)netif->input,
-                  (void *)netif->output,
-                  (void *)netif->linkoutput,
-                  (unsigned)netif->flags);
 
   return ERR_OK;
 }
@@ -1287,8 +1203,8 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef* ethHandle)
     HAL_NVIC_SetPriority(ETH_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(ETH_IRQn);
 
-    DebugUART_Print("[ETH] MSP init done: RMII pins configured for NUCLEO-H723ZG\r\n");
-    DebugUART_Print("[ETH] TX pins: PG11=TX_EN, PG13=TXD0, PB13=TXD1\r\n");
+    //DebugUART_Print("[ETH] MSP init done: RMII pins configured for NUCLEO-H723ZG\r\n");
+    //DebugUART_Print("[ETH] TX pins: PG11=TX_EN, PG13=TXD0, PB13=TXD1\r\n");
   }
 }
 

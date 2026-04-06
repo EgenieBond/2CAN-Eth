@@ -147,13 +147,14 @@ extern "C" {
 #define LWIP_NETIF_STATUS_CALLBACK        1
 
 /* ===== Debug ===== */
-#define LWIP_DEBUG                        1
-#define LWIP_DBG_TYPES_ON                 (LWIP_DBG_ON | LWIP_DBG_LEVEL_ALL)
+#define LWIP_DEBUG                        0
+//#define LWIP_DBG_TYPES_ON                 (LWIP_DBG_ON | LWIP_DBG_LEVEL_ALL)
+#define LWIP_DBG_TYPES_ON                 LWIP_DBG_OFF
 
 #define ETHARP_DEBUG                      LWIP_DBG_OFF
 #define NETIF_DEBUG                       LWIP_DBG_OFF
-#define IP_DEBUG                          LWIP_DBG_ON
-#define ICMP_DEBUG                        LWIP_DBG_ON
+#define IP_DEBUG                          LWIP_DBG_OFF
+#define ICMP_DEBUG                        LWIP_DBG_OFF
 #define PBUF_DEBUG                        LWIP_DBG_OFF
 #define TCPIP_DEBUG                       LWIP_DBG_OFF
 
