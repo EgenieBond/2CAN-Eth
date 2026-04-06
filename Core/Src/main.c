@@ -20,6 +20,7 @@
 #include "eth_app.h"
 #include "core_task.h"
 #include "can_task.h"
+#include "raw_tcp_client.h"
 
 extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
@@ -76,7 +77,6 @@ void StartDefaultTask(void *argument);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -89,18 +89,7 @@ int main(void)
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
-  /* ВРЕМЕННЫЙ ТЕСТ:
-     полностью отключаем D-Cache, чтобы исключить cache-related баги Ethernet DMA */
-  SCB_DisableDCache();
-  __DSB();
-  __ISB();
-
-  /* === FIX: disable unaligned access trap (temporary) ===
-     If UNALIGN_TRP is enabled, any unaligned word access triggers UsageFault.
-     We'll disable it to stop HardFault while we fix stack/alignment issues.
-  */
-
-  /* Disable unaligned access trap (prevents UsageFault UNALIGNED) */
+  /* Disable unaligned access trap (temporary) */
   SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
   __DSB();
   __ISB();
@@ -122,24 +111,19 @@ int main(void)
   MX_USART3_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  DebugUART_Print("[BOOT] after UART init\r\n");
 
-  /* печатаем причину ресета СРАЗУ, пока еще не успели уйти в RTOS */
+  /* печатаем причину ресета сразу */
   uint32_t rsr = RCC->RSR;
-  DebugUART_Print("[RESET] RCC->RSR=0x%08lX\r\n", rsr);
+  //DebugUART_Print("[RESET] RCC->RSR=0x%08lX\r\n", rsr);
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
-  /* Тест UART перед запуском RTOS */
   uint8_t msg[] = "\r\n=== SYSTEM START ===\r\n";
-  HAL_UART_Transmit(&huart3, msg, sizeof(msg)-1, 100);
+  HAL_UART_Transmit(&huart3, msg, sizeof(msg) - 1, 100);
 
-  DebugUART_Print("CPU Clock: %lu Hz\r\n", SystemCoreClock);
-  DebugUART_Print("Starting FreeRTOS...\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
-  DebugUART_Print("[BOOT] after osKernelInitialize\r\n");
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* USER CODE END RTOS_MUTEX */
@@ -151,11 +135,9 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -167,17 +149,9 @@ int main(void)
   /* Start scheduler */
   osKernelStart();
 
-  /* We should never get here as control is now taken by the scheduler */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -332,8 +306,6 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   (void)argument;
-  DebugUART_Print("[HEAP] free before EthTask_Start: %lu\r\n", (uint32_t)xPortGetFreeHeapSize());
-  DebugUART_Print("[TASK] default task started\r\n");
 
   DebugUART_InitMutex();
 
@@ -341,22 +313,29 @@ void StartDefaultTask(void *argument)
   __DSB();
   __ISB();
 
-  DebugUART_Print("[CPU] CCR before LWIP = 0x%08lX\r\n", SCB->CCR);
-
   /* init lwIP */
   MX_LWIP_Init();
-  DebugUART_Print("[HEAP] free after LWIP init: %lu\r\n", (uint32_t)xPortGetFreeHeapSize());
-  DebugUART_Print("[HEAP] min ever free:      %lu\r\n", (uint32_t)xPortGetMinimumEverFreeHeapSize());
   DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
-  /* ВКЛЮЧАЕМ внутренний pipeline */
-  //EthApp_Init();
-  //CoreTask_Start();
-  //CanTask_Start();
+  /*
+   * ВРЕМЕННО:
+   * отключаем внутренний pipeline SLCAN/Core/CAN.
+   * Сейчас режим сырого TCP:
+   *  - либо ECHO
+   *  - либо PROXY STM32 <-> NetCAN2
+   */
+  // EthApp_Init();
+  // CoreTask_Start();
+  // CanTask_Start();
 
-  /* start EthernetTask */
+  /* старт Ethernet-задачи, которая поднимет линк и сервер */
   EthernetTask_Start();
-  ETH_DebugPrintCounters("AFTER_ETH_TASK_START");
+
+  /*
+   * старт TCP-клиента STM32 -> NetCAN2
+   * он сам будет пытаться подключаться, когда сеть поднимется
+   */
+  RawTcpClientTask_Start();
 
   for (;;)
   {

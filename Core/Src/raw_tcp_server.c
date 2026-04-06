@@ -12,9 +12,15 @@
 #include "debug_uart.h"
 #include <string.h>
 #include <stdint.h>
+#include "raw_tcp_client.h"
 
 #define TCP_SERVER_PORT 2001
 #define RAW_TCP_ASYNC_TX_MAX_LEN 128
+/*
+ * 0 = echo mode
+ * 1 = proxy mode (PC -> STM32 server -> NetCAN2 client)
+ */
+#define TCP_BRIDGE_MODE_PROXY  0
 
 static struct tcp_pcb *server_pcb = NULL;
 static struct tcp_pcb *client_pcb = NULL;
@@ -36,8 +42,7 @@ static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
     LWIP_UNUSED_ARG(arg);
     LWIP_UNUSED_ARG(tpcb);
-
-    DebugUART_Print("[TCP] SENT cb: acked=%u bytes\r\n", (unsigned)len);
+    LWIP_UNUSED_ARG(len);
     return ERR_OK;
 }
 
@@ -56,7 +61,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
 
     if (p == NULL)
     {
-        DebugUART_Print("[TCP] Client disconnected (p==NULL)\r\n");
+        DebugUART_Print("[TCP-SRV] client disconnected\r\n");
 
         tcp_arg(tpcb, NULL);
         tcp_recv(tpcb, NULL);
@@ -66,7 +71,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
         err_t close_err = tcp_close(tpcb);
         if (close_err != ERR_OK)
         {
-            DebugUART_Print("[TCP] tcp_close err=%d -> abort\r\n", (int)close_err);
+            DebugUART_Print("[TCP-SRV] tcp_close err=%d -> abort\r\n", (int)close_err);
             tcp_abort(tpcb);
         }
 
@@ -76,7 +81,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
 
     if (err != ERR_OK)
     {
-        DebugUART_Print("[TCP] RECV err=%d -> drop\r\n", (int)err);
+        DebugUART_Print("[TCP-SRV] recv err=%d\r\n", (int)err);
         pbuf_free(p);
         return err;
     }
@@ -88,10 +93,36 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
         const uint8_t *data = (const uint8_t *)q->payload;
         const uint16_t len  = q->len;
 
-        DebugUART_Print("[TCP] RX chunk len=%u\r\n", (unsigned)len);
+        if ((data == NULL) || (len == 0U))
+        {
+            continue;
+        }
 
-        /* Передаем байты в pipeline */
-        ClientHandler_InputBytes(data, len);
+#if defined(TCP_BRIDGE_MODE_PROXY) && (TCP_BRIDGE_MODE_PROXY == 1)
+        /*
+         * PROXY MODE:
+         * что пришло от ПК -> пересылаем в NetCAN2
+         */
+        if (RawTcpClient_IsConnected())
+        {
+            int rc = RawTcpClient_Send(data, len);
+            DebugUART_Print("[TCP-SRV] RX %u bytes from PC -> NETCAN2 rc=%d\r\n",
+                            (unsigned)len, rc);
+        }
+        else
+        {
+            DebugUART_Print("[TCP-SRV] RX %u bytes from PC, but NETCAN2 is not connected\r\n",
+                            (unsigned)len);
+        }
+#else
+        /*
+         * ECHO MODE:
+         * что пришло от ПК -> сразу отправляем обратно ПК
+         */
+        int rc = RawTcpServer_Send(data, len);
+        DebugUART_Print("[TCP-SRV] ECHO %u bytes rc=%d\r\n",
+                        (unsigned)len, rc);
+#endif
     }
 
     pbuf_free(p);
@@ -142,8 +173,7 @@ static void raw_tcp_send_cb(void *arg)
     if (ctx == NULL)
         return;
 
-    int rc = RawTcpServer_Send(ctx->data, ctx->len);
-    DebugUART_Print("[TCP] Async send cb rc=%d len=%u\r\n", rc, (unsigned)ctx->len);
+    (void)RawTcpServer_Send(ctx->data, ctx->len);
 }
 
 /* ===== PUBLIC API ===== */
@@ -159,11 +189,6 @@ int RawTcpServer_HasClient(void)
  */
 int RawTcpServer_Send(const uint8_t *data, size_t len)
 {
-    DebugUART_Print("[TCP] SEND request len=%u client_pcb=%p sndbuf=%u\r\n",
-                    (unsigned)len,
-                    (void*)client_pcb,
-                    client_pcb ? (unsigned)tcp_sndbuf(client_pcb) : 0U);
-
     err_t wr;
     err_t out;
 
@@ -175,11 +200,6 @@ int RawTcpServer_Send(const uint8_t *data, size_t len)
         DebugUART_Print("[TCP] SEND skipped: no active client\r\n");
         return -2;
     }
-
-    DebugUART_Print("[TCP] client state=%d local_port=%u remote_port=%u\r\n",
-                    (int)client_pcb->state,
-                    (unsigned)client_pcb->local_port,
-                    (unsigned)client_pcb->remote_port);
 
     wr = tcp_write(client_pcb, data, (u16_t)len, TCP_WRITE_FLAG_COPY);
     if (wr != ERR_OK)
@@ -198,7 +218,6 @@ int RawTcpServer_Send(const uint8_t *data, size_t len)
         return -4;
     }
 
-    DebugUART_Print("[TCP] TX OK len=%u\r\n", (unsigned)len);
     return 0;
 }
 
@@ -231,16 +250,12 @@ int RawTcpServer_SendAsync(const uint8_t *data, size_t len)
         return -4;
     }
 
-    DebugUART_Print("[TCP] Async send scheduled len=%u\r\n", (unsigned)len);
     return 0;
 }
 
 /* ===== INIT ===== */
-
 void RawTcpServer_Init(void)
 {
-    DebugUART_Print("[TCP] RawTcpServer_Init enter\r\n");
-
     if (server_pcb != NULL)
     {
         DebugUART_Print("[TCP] previous server pcb exists\r\n");
@@ -272,6 +287,5 @@ void RawTcpServer_Init(void)
     }
 
     tcp_accept(server_pcb, tcp_server_accept);
-    DebugUART_Print("[TCP] accept callback installed, pcb=%p\r\n", (void*)server_pcb);
     DebugUART_Print("[TCP] Listening on port %d\r\n", TCP_SERVER_PORT);
 }

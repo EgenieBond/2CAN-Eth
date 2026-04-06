@@ -8,6 +8,7 @@
 "./Core/Src/fake_client_source.o"
 "./Core/Src/freertos.o"
 "./Core/Src/main.o"
+"./Core/Src/raw_tcp_client.o"
 "./Core/Src/raw_tcp_server.o"
 "./Core/Src/slcan_parser.o"
 "./Core/Src/stm32h7xx_hal_msp.o"
