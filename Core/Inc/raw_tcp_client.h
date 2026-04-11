@@ -15,19 +15,8 @@
 extern "C" {
 #endif
 
-/*
- * Запускает FreeRTOS-задачу клиента.
- * Задача сама ждёт поднятия сети и пытается подключиться к NetCAN2.
- */
 void RawTcpClientTask_Start(void);
-
-/* Состояние подключения к NetCAN2 */
 int  RawTcpClient_IsConnected(void);
-
-/*
- * Отправка в NetCAN2.
- * ВАЖНО: вызывать только из tcpip_thread / raw callbacks.
- */
 int  RawTcpClient_Send(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus

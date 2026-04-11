@@ -1,5 +1,5 @@
 Core/Src/raw_tcp_server.o: ../Core/Src/raw_tcp_server.c \
- ../Core/Inc/raw_tcp_server.h ../Core/Inc/client_handler.h \
+ ../Core/Inc/raw_tcp_server.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/tcp.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/opt.h \
  ../LWIP/Target/lwipopts.h ../Core/Inc/main.h \
@@ -79,7 +79,6 @@ Core/Src/raw_tcp_server.o: ../Core/Src/raw_tcp_server.c \
  ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h \
  ../Core/Inc/debug_uart.h ../Core/Inc/raw_tcp_client.h
 ../Core/Inc/raw_tcp_server.h:
-../Core/Inc/client_handler.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/tcp.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/opt.h:
 ../LWIP/Target/lwipopts.h:

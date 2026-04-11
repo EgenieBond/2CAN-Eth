@@ -1,8 +1,16 @@
 /*
  * raw_tcp_client.c
  *
- *  Created on: Apr 6, 2026
- *      Author: Egenie
+ * TCP RAW client for STM32
+ * Задача:
+ * - STM32 сама подключается к удалённому TCP server
+ * - всё, что приходит от remote server, пересылается в local PC client,
+ *   который подключён к TCP server STM32
+ * - всё, что приходит от local PC client, raw_tcp_server.c пересылает сюда
+ *
+ * ВАЖНО:
+ * В этом варианте УБРАНЫ автотестовые посылки stm_to_pc_001 / stm_to_pc_002 / ...
+ * То есть клиент STM32 теперь только держит соединение и работает как часть моста.
  */
 
 #include "raw_tcp_client.h"
@@ -23,18 +31,17 @@
 extern struct netif gnetif;
 
 /*
- * НАСТРОЙ ПОД СТЕНД НА ПРЕДПРИЯТИИ
- * IP/порт сервера NetCAN2
+ * IP/порт удалённого сервера, к которому STM32 подключается как клиент
  */
-#define NETCAN2_IP0    10
-#define NETCAN2_IP1    0
-#define NETCAN2_IP2    0
-#define NETCAN2_IP3    200
+#define REMOTE_TCP_IP0    192
+#define REMOTE_TCP_IP1    168
+#define REMOTE_TCP_IP2    0
+#define REMOTE_TCP_IP3    117
 
-#define NETCAN2_PORT   2001
+#define REMOTE_TCP_PORT   2001
 
-#define TCP_CLIENT_TASK_STACK   4096
-#define TCP_CLIENT_TASK_DELAY_MS 1000
+#define TCP_CLIENT_TASK_STACK      4096
+#define TCP_CLIENT_TASK_DELAY_MS   1000
 
 static osThreadId_t g_rawTcpClientTaskHandle = NULL;
 
@@ -42,7 +49,7 @@ static struct tcp_pcb *g_client_pcb = NULL;
 static volatile uint8_t g_client_connected = 0;
 static volatile uint8_t g_connect_in_progress = 0;
 
-/* ---------- internal helpers ---------- */
+/* ---------------- internal helpers ---------------- */
 
 static void RawTcpClient_ResetState(void)
 {
@@ -91,7 +98,7 @@ static err_t raw_tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p
 
     if (p == NULL)
     {
-        DebugUART_Print("[TCP-CLI] NetCAN2 disconnected\r\n");
+        DebugUART_Print("[TCP-CLI] remote server disconnected\r\n");
 
         tcp_arg(tpcb, NULL);
         tcp_recv(tpcb, NULL);
@@ -126,15 +133,22 @@ static err_t raw_tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p
             continue;
 
         /*
-         * Что пришло от NetCAN2 -> отправляем в ПК,
-         * который подключён к серверу STM32
+         * Remote -> STM32 client -> local PC, подключённый к server STM32
          *
          * Мы уже внутри raw callback, то есть внутри tcpip_thread,
-         * поэтому можно вызывать RawTcpServer_Send напрямую.
+         * поэтому RawTcpServer_Send() можно вызывать напрямую.
          */
         int rc = RawTcpServer_Send(data, len);
-        DebugUART_Print("[TCP-CLI] RX %u bytes from NETCAN2 -> PC rc=%d\r\n",
-                        (unsigned)len, rc);
+
+        if (rc == 0)
+        {
+            DebugUART_Print("[TCP-CLI] REMOTE -> PC %u bytes OK\r\n", (unsigned)len);
+        }
+        else
+        {
+            DebugUART_Print("[TCP-CLI] REMOTE -> PC %u bytes FAIL rc=%d\r\n",
+                            (unsigned)len, rc);
+        }
     }
 
     pbuf_free(p);
@@ -167,9 +181,9 @@ static err_t raw_tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err
     tcp_sent(tpcb, raw_tcp_client_sent);
     tcp_err(tpcb, raw_tcp_client_err);
 
-    DebugUART_Print("[TCP-CLI] connected to NetCAN2 %d.%d.%d.%d:%d\r\n",
-                    NETCAN2_IP0, NETCAN2_IP1, NETCAN2_IP2, NETCAN2_IP3,
-                    NETCAN2_PORT);
+    DebugUART_Print("[TCP-CLI] connected to server %d.%d.%d.%d:%d\r\n",
+                    REMOTE_TCP_IP0, REMOTE_TCP_IP1, REMOTE_TCP_IP2, REMOTE_TCP_IP3,
+                    REMOTE_TCP_PORT);
 
     return ERR_OK;
 }
@@ -196,19 +210,25 @@ static void raw_tcp_client_connect_cb(void *arg)
     }
 
     ip_addr_t remote_ip;
-    IP_ADDR4(&remote_ip, NETCAN2_IP0, NETCAN2_IP1, NETCAN2_IP2, NETCAN2_IP3);
+    IP_ADDR4(&remote_ip,
+             REMOTE_TCP_IP0,
+             REMOTE_TCP_IP1,
+             REMOTE_TCP_IP2,
+             REMOTE_TCP_IP3);
 
     g_client_pcb = pcb;
     g_connect_in_progress = 1;
 
-    DebugUART_Print("[TCP-CLI] connecting to NetCAN2 %d.%d.%d.%d:%d ...\r\n",
-                    NETCAN2_IP0, NETCAN2_IP1, NETCAN2_IP2, NETCAN2_IP3,
-                    NETCAN2_PORT);
+    DebugUART_Print("[TCP-CLI] connecting to %d.%d.%d.%d:%d ...\r\n",
+                    REMOTE_TCP_IP0, REMOTE_TCP_IP1, REMOTE_TCP_IP2, REMOTE_TCP_IP3,
+                    REMOTE_TCP_PORT);
 
-    err_t err = tcp_connect(pcb, &remote_ip, NETCAN2_PORT, raw_tcp_client_connected);
+    err_t err = tcp_connect(pcb, &remote_ip, REMOTE_TCP_PORT, raw_tcp_client_connected);
+
+    DebugUART_Print("[TCP-CLI] tcp_connect returned err=%d\r\n", (int)err);
+
     if (err != ERR_OK)
     {
-        DebugUART_Print("[TCP-CLI] tcp_connect err=%d\r\n", (int)err);
         RawTcpClient_ClosePcb(pcb);
         RawTcpClient_ResetState();
     }
@@ -238,7 +258,7 @@ static void RawTcpClientTask(void *argument)
     }
 }
 
-/* ---------- public API ---------- */
+/* ---------------- public API ---------------- */
 
 void RawTcpClientTask_Start(void)
 {
@@ -287,5 +307,6 @@ int RawTcpClient_Send(const uint8_t *data, size_t len)
         return -4;
     }
 
+    DebugUART_Print("[TCP-CLI] TX %u bytes\r\n", (unsigned)len);
     return 0;
 }
