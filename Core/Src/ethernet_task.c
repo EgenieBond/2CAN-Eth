@@ -140,7 +140,7 @@ void EthernetTask(void *argument)
   const char *boot = "\r\n[ETH] EthernetTask ENTER (HAL_UART_Transmit)\r\n";
   HAL_UART_Transmit(&huart3, (uint8_t*)boot, (uint16_t)strlen(boot), 100);
 
-  DebugUART_Print("[ETH] Ethernet task started (DebugUART)\r\n");
+  //DebugUART_Print("[ETH] Ethernet task started (DebugUART)\r\n");
 
   DumpMemLayout();
 

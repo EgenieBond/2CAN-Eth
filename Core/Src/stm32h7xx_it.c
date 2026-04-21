@@ -22,10 +22,10 @@
 #include "stm32h7xx_it.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "cmsis_os.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "debug_uart.h"
+#include "cmsis_os.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,13 +55,17 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+extern FDCAN_HandleTypeDef hfdcan1;
+void FDCAN1_IT0_IRQHandler(void)
+{
+  HAL_FDCAN_IRQHandler(&hfdcan1);
+}
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
 extern ETH_HandleTypeDef heth;
 /* USER CODE BEGIN EV */
-
+extern volatile uint32_t g_eth_irq_handler_cnt;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -198,6 +202,19 @@ void DebugMon_Handler(void)
 /**
   * @brief This function handles System tick timer.
   */
+void SysTick_Handler(void)
+{
+  HAL_IncTick();
+
+#if (INCLUDE_xTaskGetSchedulerState == 1)
+  if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
+  {
+    xPortSysTickHandler();
+  }
+#else
+  xPortSysTickHandler();
+#endif
+}
 
 /******************************************************************************/
 /* STM32H7xx Peripheral Interrupt Handlers                                    */
@@ -211,31 +228,12 @@ void DebugMon_Handler(void)
   */
 void ETH_IRQHandler(void)
 {
-  /* USER CODE BEGIN ETH_IRQn 0 */
-
-  /* USER CODE END ETH_IRQn 0 */
+  g_eth_irq_handler_cnt++;
   HAL_ETH_IRQHandler(&heth);
-  /* USER CODE BEGIN ETH_IRQn 1 */
-
-  /* USER CODE END ETH_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */
 /**
   * @brief This function handles System tick timer.
   */
-void SysTick_Handler(void)
-{
-  HAL_IncTick();
-
-  /* FreeRTOS tick only after scheduler start */
-#if (INCLUDE_xTaskGetSchedulerState == 1)
-  if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
-  {
-    xPortSysTickHandler();
-  }
-#else
-  xPortSysTickHandler();
-#endif
-}
 /* USER CODE END 1 */

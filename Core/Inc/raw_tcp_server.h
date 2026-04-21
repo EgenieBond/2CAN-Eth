@@ -17,7 +17,12 @@ extern "C" {
 
 void RawTcpServer_Init(void);
 int  RawTcpServer_HasClient(void);
+
+/* Вызывать только из tcpip_thread / raw callbacks */
 int  RawTcpServer_Send(const uint8_t *data, size_t len);
+
+/* Безопасно вызывать из обычных FreeRTOS задач */
+int  RawTcpServer_SendAsync(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

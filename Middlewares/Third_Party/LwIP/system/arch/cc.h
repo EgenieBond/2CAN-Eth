@@ -51,17 +51,19 @@ typedef int sys_prot_t;
 #if defined (__ICCARM__)
 
 #define PACK_STRUCT_BEGIN
-#define PACK_STRUCT_STRUCT 
+#define PACK_STRUCT_STRUCT
 #define PACK_STRUCT_END
 #define PACK_STRUCT_FIELD(x) x
 #define PACK_STRUCT_USE_INCLUDES
 
 #elif defined (__GNUC__)
 
-#define PACK_STRUCT_BEGIN
-#define PACK_STRUCT_STRUCT __attribute__ ((__packed__))
-#define PACK_STRUCT_END
+#define PACK_STRUCT_BEGIN _Pragma("pack(push, 1)")
+#define PACK_STRUCT_STRUCT
+#define PACK_STRUCT_END _Pragma("pack(pop)")
 #define PACK_STRUCT_FIELD(x) x
+#define PACK_STRUCT_FLD_8(x) x
+#define PACK_STRUCT_FLD_S(x) x
 
 #elif defined (__CC_ARM)
 
@@ -77,6 +79,20 @@ typedef int sys_prot_t;
 #define PACK_STRUCT_END
 #define PACK_STRUCT_FIELD(x) x
 
+#endif
+
+#ifndef IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T
+#define IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(dest, src) do { \
+  ((u16_t *)(void *)(dest))[0] = ((const u16_t *)(const void *)(src))[0]; \
+  ((u16_t *)(void *)(dest))[1] = ((const u16_t *)(const void *)(src))[1]; \
+} while (0)
+#endif
+
+#ifndef IPADDR_WORDALIGNED_COPY_FROM_IP4_ADDR_T
+#define IPADDR_WORDALIGNED_COPY_FROM_IP4_ADDR_T(dest, src) do { \
+  ((u16_t *)(void *)(dest))[0] = ((const u16_t *)(const void *)(src))[0]; \
+  ((u16_t *)(void *)(dest))[1] = ((const u16_t *)(const void *)(src))[1]; \
+} while (0)
 #endif
 
 #ifndef LWIP_PLATFORM_ASSERT

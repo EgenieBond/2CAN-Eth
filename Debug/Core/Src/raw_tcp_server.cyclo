@@ -1,7 +1,9 @@
-../Core/Src/raw_tcp_server.c:22:14:tcp_server_sent	1
-../Core/Src/raw_tcp_server.c:31:13:tcp_server_error	1
-../Core/Src/raw_tcp_server.c:39:14:tcp_server_recv	4
-../Core/Src/raw_tcp_server.c:82:14:tcp_server_accept	4
-../Core/Src/raw_tcp_server.c:120:5:RawTcpServer_HasClient	1
-../Core/Src/raw_tcp_server.c:125:5:RawTcpServer_Send	9
-../Core/Src/raw_tcp_server.c:175:6:RawTcpServer_Init	5
+../Core/Src/raw_tcp_server.c:35:14:tcp_server_sent	1
+../Core/Src/raw_tcp_server.c:43:13:tcp_server_error	1
+../Core/Src/raw_tcp_server.c:51:14:tcp_server_recv	5
+../Core/Src/raw_tcp_server.c:100:14:tcp_server_accept	4
+../Core/Src/raw_tcp_server.c:138:13:raw_tcp_send_cb	2
+../Core/Src/raw_tcp_server.c:149:5:RawTcpServer_HasClient	1
+../Core/Src/raw_tcp_server.c:158:5:RawTcpServer_Send	7
+../Core/Src/raw_tcp_server.c:192:5:RawTcpServer_SendAsync	6
+../Core/Src/raw_tcp_server.c:225:6:RawTcpServer_Init	5

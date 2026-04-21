@@ -3,7 +3,7 @@
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:239:1:netif_add_noaddr	1
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:276:1:netif_add	14
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:442:1:netif_do_ip_addr_changed	1
-../Middlewares/Third_Party/LwIP/src/core/netif.c:457:1:netif_do_set_ipaddr	5
+../Middlewares/Third_Party/LwIP/src/core/netif.c:457:1:netif_do_set_ipaddr	6
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:500:1:netif_set_ipaddr	3
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:523:1:netif_do_set_netmask	3
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:560:1:netif_set_netmask	3
@@ -12,9 +12,10 @@
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:658:1:netif_set_addr	8
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:737:1:netif_remove	8
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:822:1:netif_set_default	1
-../Middlewares/Third_Party/LwIP/src/core/netif.c:844:1:netif_set_up	3
+../Middlewares/Third_Party/LwIP/src/core/netif.c:844:1:netif_set_up	4
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:875:1:netif_issue_reports	7
-../Middlewares/Third_Party/LwIP/src/core/netif.c:919:1:netif_set_down	4
+../Middlewares/Third_Party/LwIP/src/core/netif.c:919:1:netif_set_down	5
+../Middlewares/Third_Party/LwIP/src/core/netif.c:957:1:netif_set_status_callback	2
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:988:1:netif_set_link_up	4
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:1026:1:netif_set_link_down	4
 ../Middlewares/Third_Party/LwIP/src/core/netif.c:1051:1:netif_set_link_callback	2

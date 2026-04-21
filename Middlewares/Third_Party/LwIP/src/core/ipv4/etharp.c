@@ -43,6 +43,8 @@
  *
  */
 
+#include "debug_uart.h"
+
 #include "lwip/opt.h"
 
 #if LWIP_IPV4 && LWIP_ARP /* don't build if not configured for use in lwipopts.h */
@@ -131,6 +133,7 @@ static netif_addr_idx_t etharp_cached_entry;
 
 
 static err_t etharp_request_dst(struct netif *netif, const ip4_addr_t *ipaddr, const struct eth_addr *hw_dst_addr);
+
 static err_t etharp_raw(struct netif *netif,
                         const struct eth_addr *ethsrc_addr, const struct eth_addr *ethdst_addr,
                         const struct eth_addr *hwsrc_addr, const ip4_addr_t *ipsrc_addr,
@@ -641,103 +644,65 @@ void
 etharp_input(struct pbuf *p, struct netif *netif)
 {
   struct etharp_hdr *hdr;
-  /* these are aligned properly, whereas the ARP header fields might not be */
   ip4_addr_t sipaddr, dipaddr;
   u8_t for_us;
 
   LWIP_ASSERT_CORE_LOCKED();
-
   LWIP_ERROR("netif != NULL", (netif != NULL), return;);
 
   hdr = (struct etharp_hdr *)p->payload;
 
-  /* RFC 826 "Packet Reception": */
   if ((hdr->hwtype != PP_HTONS(LWIP_IANA_HWTYPE_ETHERNET)) ||
       (hdr->hwlen != ETH_HWADDR_LEN) ||
       (hdr->protolen != sizeof(ip4_addr_t)) ||
       (hdr->proto != PP_HTONS(ETHTYPE_IP)))  {
-    LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_LEVEL_WARNING,
-                ("etharp_input: packet dropped, wrong hw type, hwlen, proto, protolen or ethernet type (%"U16_F"/%"U16_F"/%"U16_F"/%"U16_F")\n",
-                 hdr->hwtype, (u16_t)hdr->hwlen, hdr->proto, (u16_t)hdr->protolen));
+
     ETHARP_STATS_INC(etharp.proterr);
     ETHARP_STATS_INC(etharp.drop);
     pbuf_free(p);
     return;
   }
+
   ETHARP_STATS_INC(etharp.recv);
 
 #if LWIP_AUTOIP
-  /* We have to check if a host already has configured our random
-   * created link local address and continuously check if there is
-   * a host with this IP-address so we can detect collisions */
   autoip_arp_reply(netif, hdr);
 #endif /* LWIP_AUTOIP */
 
-  /* Copy struct ip4_addr_wordaligned to aligned ip4_addr, to support compilers without
-   * structure packing (not using structure copy which breaks strict-aliasing rules). */
   IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(&sipaddr, &hdr->sipaddr);
   IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(&dipaddr, &hdr->dipaddr);
 
-  /* this interface is not configured? */
   if (ip4_addr_isany_val(*netif_ip4_addr(netif))) {
     for_us = 0;
   } else {
-    /* ARP packet directed to us? */
     for_us = (u8_t)ip4_addr_cmp(&dipaddr, netif_ip4_addr(netif));
   }
 
-  /* ARP message directed to us?
-      -> add IP address in ARP cache; assume requester wants to talk to us,
-         can result in directly sending the queued packets for this host.
-     ARP message not directed to us?
-      ->  update the source IP address in the cache, if present */
   etharp_update_arp_entry(netif, &sipaddr, &(hdr->shwaddr),
                           for_us ? ETHARP_FLAG_TRY_HARD : ETHARP_FLAG_FIND_ONLY);
 
-  /* now act on the message itself */
   switch (hdr->opcode) {
-    /* ARP request? */
     case PP_HTONS(ARP_REQUEST):
-      /* ARP request. If it asked for our address, we send out a
-       * reply. In any case, we time-stamp any existing ARP entry,
-       * and possibly send out an IP packet that was queued on it. */
-
-      LWIP_DEBUGF (ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: incoming ARP request\n"));
-      /* ARP request for our address? */
       if (for_us) {
-        /* send ARP response */
         etharp_raw(netif,
                    (struct eth_addr *)netif->hwaddr, &hdr->shwaddr,
                    (struct eth_addr *)netif->hwaddr, netif_ip4_addr(netif),
                    &hdr->shwaddr, &sipaddr,
                    ARP_REPLY);
-        /* we are not configured? */
-      } else if (ip4_addr_isany_val(*netif_ip4_addr(netif))) {
-        /* { for_us == 0 and netif->ip_addr.addr == 0 } */
-        LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: we are unconfigured, ARP request ignored.\n"));
-        /* request was not directed to us */
-      } else {
-        /* { for_us == 0 and netif->ip_addr.addr != 0 } */
-        LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: ARP request was not for us.\n"));
       }
       break;
+
     case PP_HTONS(ARP_REPLY):
-      /* ARP reply. We already updated the ARP cache earlier. */
-      LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: incoming ARP reply\n"));
 #if (LWIP_DHCP && DHCP_DOES_ARP_CHECK)
-      /* DHCP wants to know about ARP replies from any host with an
-       * IP address also offered to us by the DHCP server. We do not
-       * want to take a duplicate IP address on a single network.
-       * @todo How should we handle redundant (fail-over) interfaces? */
       dhcp_arp_reply(netif, &sipaddr);
 #endif /* (LWIP_DHCP && DHCP_DOES_ARP_CHECK) */
       break;
+
     default:
-      LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: ARP unknown opcode type %"S16_F"\n", lwip_htons(hdr->opcode)));
       ETHARP_STATS_INC(etharp.err);
       break;
   }
-  /* free ARP packet */
+
   pbuf_free(p);
 }
 
@@ -1110,57 +1075,45 @@ etharp_raw(struct netif *netif, const struct eth_addr *ethsrc_addr,
 
   LWIP_ASSERT("netif != NULL", netif != NULL);
 
-  /* allocate a pbuf for the outgoing ARP request packet */
   p = pbuf_alloc(PBUF_LINK, SIZEOF_ETHARP_HDR, PBUF_RAM);
-  /* could allocate a pbuf for an ARP request? */
   if (p == NULL) {
-    LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_LEVEL_SERIOUS,
-                ("etharp_raw: could not allocate pbuf for ARP request.\n"));
     ETHARP_STATS_INC(etharp.memerr);
     return ERR_MEM;
   }
+
   LWIP_ASSERT("check that first pbuf can hold struct etharp_hdr",
               (p->len >= SIZEOF_ETHARP_HDR));
 
   hdr = (struct etharp_hdr *)p->payload;
-  LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_raw: sending raw ARP packet.\n"));
+
   hdr->opcode = lwip_htons(opcode);
 
   LWIP_ASSERT("netif->hwaddr_len must be the same as ETH_HWADDR_LEN for etharp!",
               (netif->hwaddr_len == ETH_HWADDR_LEN));
 
-  /* Write the ARP MAC-Addresses */
   SMEMCPY(&hdr->shwaddr, hwsrc_addr, ETH_HWADDR_LEN);
   SMEMCPY(&hdr->dhwaddr, hwdst_addr, ETH_HWADDR_LEN);
-  /* Copy struct ip4_addr_wordaligned to aligned ip4_addr, to support compilers without
-   * structure packing. */
   IPADDR_WORDALIGNED_COPY_FROM_IP4_ADDR_T(&hdr->sipaddr, ipsrc_addr);
   IPADDR_WORDALIGNED_COPY_FROM_IP4_ADDR_T(&hdr->dipaddr, ipdst_addr);
 
   hdr->hwtype = PP_HTONS(LWIP_IANA_HWTYPE_ETHERNET);
   hdr->proto = PP_HTONS(ETHTYPE_IP);
-  /* set hwlen and protolen */
   hdr->hwlen = ETH_HWADDR_LEN;
   hdr->protolen = sizeof(ip4_addr_t);
 
-  /* send ARP query */
 #if LWIP_AUTOIP
-  /* If we are using Link-Local, all ARP packets that contain a Link-Local
-   * 'sender IP address' MUST be sent using link-layer broadcast instead of
-   * link-layer unicast. (See RFC3927 Section 2.5, last paragraph) */
   if (ip4_addr_islinklocal(ipsrc_addr)) {
-    ethernet_output(netif, p, ethsrc_addr, &ethbroadcast, ETHTYPE_ARP);
+    result = ethernet_output(netif, p, ethsrc_addr, &ethbroadcast, ETHTYPE_ARP);
   } else
 #endif /* LWIP_AUTOIP */
   {
-    ethernet_output(netif, p, ethsrc_addr, ethdst_addr, ETHTYPE_ARP);
+    result = ethernet_output(netif, p, ethsrc_addr, ethdst_addr, ETHTYPE_ARP);
   }
 
   ETHARP_STATS_INC(etharp.xmit);
-  /* free ARP query packet */
+
   pbuf_free(p);
   p = NULL;
-  /* could not allocate pbuf for ARP request */
 
   return result;
 }

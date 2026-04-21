@@ -79,11 +79,8 @@ void MX_LWIP_Init(void)
             &ethernetif_init,
             &tcpip_input);
 
-  DebugUART_Print("[LWIP] gnetif added\r\n");
-
   /* Make it default */
   netif_set_default(&gnetif);
-  DebugUART_Print("[LWIP] netif_set_default done\r\n");
 
   /*
    * IMPORTANT:
@@ -92,7 +89,6 @@ void MX_LWIP_Init(void)
    */
   netif_set_down(&gnetif);
   netif_set_link_down(&gnetif);
-  DebugUART_Print("[LWIP] netif forced DOWN initially\r\n");
 
   /* Link/status callback */
   netif_set_link_callback(&gnetif, ethernet_link_status_updated);

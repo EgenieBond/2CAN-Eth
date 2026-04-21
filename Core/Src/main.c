@@ -16,10 +16,12 @@
 #include "ethernet_task.h"
 #include "debug_uart.h"
 #include "task.h"
-
 #include "eth_app.h"
 #include "core_task.h"
 #include "can_task.h"
+#include <string.h>
+
+extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -39,6 +41,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+FDCAN_HandleTypeDef hfdcan1;
+
 UART_HandleTypeDef huart3;
 
 /* Definitions for defaultTask */
@@ -57,6 +61,7 @@ void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_FDCAN1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -74,7 +79,6 @@ void StartDefaultTask(void *argument);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -86,12 +90,8 @@ int main(void)
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-  /* === FIX: disable unaligned access trap (temporary) ===
-     If UNALIGN_TRP is enabled, any unaligned word access triggers UsageFault.
-     We'll disable it to stop HardFault while we fix stack/alignment issues.
-  */
 
-  /* Disable unaligned access trap (prevents UsageFault UNALIGNED) */
+  /* Disable unaligned access trap (temporary) */
   SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
   __DSB();
   __ISB();
@@ -113,24 +113,16 @@ int main(void)
   MX_USART3_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  DebugUART_Print("[BOOT] after UART init\r\n");
-
-  /* печатаем причину ресета СРАЗУ, пока еще не успели уйти в RTOS */
   uint32_t rsr = RCC->RSR;
-  DebugUART_Print("[RESET] RCC->RSR=0x%08lX\r\n", rsr);
+  (void)rsr;
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
-  /* Тест UART перед запуском RTOS */
   uint8_t msg[] = "\r\n=== SYSTEM START ===\r\n";
-  HAL_UART_Transmit(&huart3, msg, sizeof(msg)-1, 100);
-
-  DebugUART_Print("CPU Clock: %lu Hz\r\n", SystemCoreClock);
-  DebugUART_Print("Starting FreeRTOS...\r\n");
+  HAL_UART_Transmit(&huart3, msg, sizeof(msg) - 1, 100);
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
-  DebugUART_Print("[BOOT] after osKernelInitialize\r\n");
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* USER CODE END RTOS_MUTEX */
@@ -142,11 +134,9 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -158,17 +148,9 @@ int main(void)
   /* Start scheduler */
   osKernelStart();
 
-  /* We should never get here as control is now taken by the scheduler */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -180,33 +162,32 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-  */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+  uint32_t timeout = HAL_GetTick();
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY))
+  {
+    if ((HAL_GetTick() - timeout) > 1000)
+    {
+      Error_Handler();
+    }
+  }
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+                              | RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              | RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
@@ -219,6 +200,104 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief FDCAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN1_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN1_Init 0 */
+
+  /* USER CODE END FDCAN1_Init 0 */
+
+  /* USER CODE BEGIN FDCAN1_Init 1 */
+
+  /* USER CODE END FDCAN1_Init 1 */
+  hfdcan1.Instance = FDCAN1;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
+  hfdcan1.Init.AutoRetransmission = DISABLE;
+  hfdcan1.Init.TransmitPause = DISABLE;
+  hfdcan1.Init.ProtocolException = DISABLE;
+  hfdcan1.Init.NominalPrescaler = 16;
+  hfdcan1.Init.NominalSyncJumpWidth = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 1;
+  hfdcan1.Init.NominalTimeSeg2 = 1;
+  hfdcan1.Init.DataPrescaler = 1;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 1;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+  hfdcan1.Init.MessageRAMOffset = 0;
+  hfdcan1.Init.StdFiltersNbr = 0;
+  hfdcan1.Init.ExtFiltersNbr = 0;
+  hfdcan1.Init.RxFifo0ElmtsNbr = 8;
+  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.RxFifo1ElmtsNbr = 0;
+  hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.RxBuffersNbr = 0;
+  hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.TxEventsNbr = 0;
+  hfdcan1.Init.TxBuffersNbr = 0;
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 3;
+  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN1_Init 2 */
+  FDCAN_FilterTypeDef sFilter = {0};
+
+  /* Standard IDs -> RX FIFO0 */
+  sFilter.IdType = FDCAN_STANDARD_ID;
+  sFilter.FilterIndex = 0;
+  sFilter.FilterType = FDCAN_FILTER_MASK;
+  sFilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  sFilter.FilterID1 = 0x000;
+  sFilter.FilterID2 = 0x000;
+
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilter) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Extended IDs -> RX FIFO0 */
+  sFilter.IdType = FDCAN_EXTENDED_ID;
+  sFilter.FilterIndex = 0;
+  sFilter.FilterType = FDCAN_FILTER_MASK;
+  sFilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  sFilter.FilterID1 = 0x00000000;
+  sFilter.FilterID2 = 0x00000000;
+
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilter) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+                                   FDCAN_ACCEPT_IN_RX_FIFO0,
+                                   FDCAN_ACCEPT_IN_RX_FIFO0,
+                                   FDCAN_REJECT_REMOTE,
+                                   FDCAN_REJECT_REMOTE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE END FDCAN1_Init 2 */
+
 }
 
 /**
@@ -278,21 +357,21 @@ static void MX_USART3_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE BEGIN MX_GPIO_Init_1 */
   /* Здесь НЕ настраиваем USART3!
      Его GPIO конфигурируются в HAL_UART_MspInit()
      (PD8 = TX, PD9 = RX)
   */
-  /* USER CODE END MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
 
-  /* Включаем тактирование портов */
+  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE BEGIN MX_GPIO_Init_2 */
   /* Если нужны другие пользовательские GPIO — настраивай здесь */
 
   /* Пример: LED PB0 (если используешь) */
@@ -306,9 +385,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
   */
 
-  /* USER CODE END MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
 }
-
 
 /* USER CODE BEGIN 4 */
 /* USER CODE END 4 */
@@ -323,23 +401,27 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   (void)argument;
-  DebugUART_Print("[HEAP] free before EthTask_Start: %lu\r\n", (uint32_t)xPortGetFreeHeapSize());
-  DebugUART_Print("[TASK] default task started\r\n");
 
   DebugUART_InitMutex();
 
+  SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
+  __DSB();
+  __ISB();
+
+
+  DebugUART_Print("[CPU] CCR = 0x%08lX\r\n", SCB->CCR);
   /* init lwIP */
   MX_LWIP_Init();
-  DebugUART_Print("[HEAP] free after LWIP init: %lu\r\n", (uint32_t)xPortGetFreeHeapSize());
-  DebugUART_Print("[HEAP] min ever free:      %lu\r\n", (uint32_t)xPortGetMinimumEverFreeHeapSize());
-  DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
-  /* ВКЛЮЧАЕМ внутренний pipeline */
+  /* init FDCAN before CAN task start */
+  //MX_FDCAN1_Init();
+
+  /* pipeline */
   EthApp_Init();
   CoreTask_Start();
-  CanTask_Start();
+  //CanTask_Start();
 
-  /* start EthernetTask */
+  /* Ethernet app task */
   EthernetTask_Start();
 
   for (;;)
@@ -349,11 +431,7 @@ void StartDefaultTask(void *argument)
 }
 
  /* MPU Configuration */
-/* MPU Configuration for STM32H723 + Ethernet (RMII) + LwIP zero-copy
-   Goal:
-   - D1 SRAM (0x2400_0000) cacheable (normal)
-   - D2 SRAM (0x3000_0000) NON-cacheable (for ETH DMA descriptors + RX pool + memp pools if placed there)
-*/
+
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
@@ -407,7 +485,7 @@ void MPU_Config(void)
 
   /* Включаем кеши (после MPU!) */
   SCB_EnableICache();
-  SCB_EnableDCache();
+  /* SCB_EnableDCache(); */   /* временно выключено для отладки Ethernet */
   __DSB();
   __ISB();
 }
@@ -418,13 +496,10 @@ void MPU_Config(void)
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef  USE_FULL_ASSERT
