@@ -59,7 +59,7 @@ extern "C" {
 #define TCP_WND_UPDATE_THRESHOLD          536
 
 #define LWIP_NETIF_LINK_CALLBACK          1
-#define TCPIP_THREAD_STACKSIZE            4096
+#define TCPIP_THREAD_STACKSIZE            8192
 #define TCPIP_THREAD_PRIO                 ((osPriority_t)osPriorityAboveNormal)
 #define TCPIP_MBOX_SIZE                   32
 #define SLIPIF_THREAD_STACKSIZE           1024
@@ -89,6 +89,11 @@ extern "C" {
 #define CHECKSUM_CHECK_ICMP6              1
 
 /* USER CODE BEGIN 1 */
+/* ===== IPv4 fragmentation ===== */
+#define IP_REASSEMBLY                   0
+#define IP_FRAG                         0
+#define MEMP_NUM_REASSDATA              0
+#define IP_REASS_MAX_PBUFS              0
 
 /* ===== Static IPv4 ===== */
 #define IP_ADDR0                          10

@@ -10,83 +10,95 @@
 #include "app_queues.h"
 #include "debug_uart.h"
 #include "can_types.h"
+#include "main.h"
+
 #include <string.h>
 #include <stdint.h>
 
 static osThreadId_t canTaskHandle = NULL;
-
-/* Значения сделаны в стиле будущего FDCAN,
-   чтобы потом было легко перейти на HAL */
-#define CAN_TX_ID_STANDARD   0U
-#define CAN_TX_ID_EXTENDED   1U
-
-#define CAN_TX_FRAME_DATA    0U
-#define CAN_TX_FRAME_RTR     1U
-
-/* Временная программная имитация входящего CAN-кадра */
-#define CAN_DEBUG_LOOPBACK_TO_CORE  1
-
-typedef struct
-{
-    uint32_t Identifier;
-    uint32_t IdType;
-    uint32_t TxFrameType;
-    uint32_t DataLength;
-} can_tx_debug_header_t;
+extern FDCAN_HandleTypeDef hfdcan1;
 
 static const char *CanTask_IdTypeToStr(uint32_t id_type)
 {
-    return (id_type == CAN_TX_ID_EXTENDED) ? "EXTENDED" : "STANDARD";
+    return (id_type == FDCAN_EXTENDED_ID) ? "EXTENDED" : "STANDARD";
 }
 
 static const char *CanTask_FrameTypeToStr(uint32_t frame_type)
 {
-    return (frame_type == CAN_TX_FRAME_RTR) ? "RTR" : "DATA";
+    return (frame_type == FDCAN_REMOTE_FRAME) ? "RTR" : "DATA";
 }
 
-static int CanTask_BuildTxHeader(const can_frame_t *frame, can_tx_debug_header_t *hdr)
+static int CanTask_BuildTxHeader(const can_frame_t *frame, FDCAN_TxHeaderTypeDef *hdr)
 {
-    if (!frame || !hdr)
+    if ((frame == NULL) || (hdr == NULL))
+    {
         return -1;
+    }
 
     if (frame->Size > 8U)
+    {
         return -1;
+    }
 
     memset(hdr, 0, sizeof(*hdr));
 
     hdr->Identifier = frame->Id;
-    hdr->DataLength = frame->Size;
 
-    if (frame->Flags & CAN_FLAG_EXTENDED)
+    if ((frame->Flags & CAN_FLAG_EXTENDED) != 0U)
     {
-        hdr->IdType = CAN_TX_ID_EXTENDED;
+        hdr->IdType = FDCAN_EXTENDED_ID;
     }
     else
     {
         if (frame->Id > 0x7FFU)
+        {
             return -1;
+        }
 
-        hdr->IdType = CAN_TX_ID_STANDARD;
+        hdr->IdType = FDCAN_STANDARD_ID;
     }
 
-    if (frame->Flags & CAN_FLAG_RTR)
+    if ((frame->Flags & CAN_FLAG_RTR) != 0U)
     {
-        hdr->TxFrameType = CAN_TX_FRAME_RTR;
+        hdr->TxFrameType = FDCAN_REMOTE_FRAME;
     }
     else
     {
-        hdr->TxFrameType = CAN_TX_FRAME_DATA;
+        hdr->TxFrameType = FDCAN_DATA_FRAME;
     }
+
+    switch (frame->Size)
+    {
+        case 0: hdr->DataLength = FDCAN_DLC_BYTES_0; break;
+        case 1: hdr->DataLength = FDCAN_DLC_BYTES_1; break;
+        case 2: hdr->DataLength = FDCAN_DLC_BYTES_2; break;
+        case 3: hdr->DataLength = FDCAN_DLC_BYTES_3; break;
+        case 4: hdr->DataLength = FDCAN_DLC_BYTES_4; break;
+        case 5: hdr->DataLength = FDCAN_DLC_BYTES_5; break;
+        case 6: hdr->DataLength = FDCAN_DLC_BYTES_6; break;
+        case 7: hdr->DataLength = FDCAN_DLC_BYTES_7; break;
+        case 8: hdr->DataLength = FDCAN_DLC_BYTES_8; break;
+        default:
+            return -1;
+    }
+
+    hdr->ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    hdr->BitRateSwitch = FDCAN_BRS_OFF;
+    hdr->FDFormat = FDCAN_CLASSIC_CAN;
+    hdr->TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    hdr->MessageMarker = 0;
 
     return 0;
 }
 
 static void CanTask_PrintInputFrame(const can_frame_t *frame)
 {
-    if (!frame)
+    if (frame == NULL)
+    {
         return;
+    }
 
-    if (frame->Flags & CAN_FLAG_RTR)
+    if ((frame->Flags & CAN_FLAG_RTR) != 0U)
     {
         DebugUART_Print("[CAN] frame from CORE: RTR ID=0x%08lX DLC=%u FLAGS=0x%02X\r\n",
                         (unsigned long)frame->Id,
@@ -108,40 +120,39 @@ static void CanTask_PrintInputFrame(const can_frame_t *frame)
     }
 }
 
-static void CanTask_PrintTxHeader(const can_tx_debug_header_t *hdr)
+static void CanTask_PrintTxHeader(const FDCAN_TxHeaderTypeDef *hdr)
 {
-    if (!hdr)
+    if (hdr == NULL)
+    {
         return;
+    }
 
     DebugUART_Print("[CAN] TX header prepared:\r\n");
     DebugUART_Print("[CAN]   IdType     = %s\r\n", CanTask_IdTypeToStr(hdr->IdType));
     DebugUART_Print("[CAN]   Identifier = 0x%08lX\r\n", (unsigned long)hdr->Identifier);
     DebugUART_Print("[CAN]   FrameType  = %s\r\n", CanTask_FrameTypeToStr(hdr->TxFrameType));
-    DebugUART_Print("[CAN]   DataLength = %lu\r\n", (unsigned long)hdr->DataLength);
+    DebugUART_Print("[CAN]   DataLength = 0x%08lX\r\n", (unsigned long)hdr->DataLength);
 }
 
-static void CanTask_DebugLoopbackToCore(const can_frame_t *frame)
+static void CanTask_PrintPayload(const can_frame_t *frame)
 {
-#if CAN_DEBUG_LOOPBACK_TO_CORE
-    can_msg_t rx_msg;
-
-    if (!frame)
+    if (frame == NULL)
+    {
         return;
-
-    memset(&rx_msg, 0, sizeof(rx_msg));
-    rx_msg.frame = *frame;
-
-    if (osMessageQueuePut(can_to_core_queue, &rx_msg, 0, 0) != osOK)
-    {
-        DebugUART_Print("[CAN] ERROR: can_to_core_queue full (debug loopback)\r\n");
     }
-    else
+
+    if ((frame->Flags & CAN_FLAG_RTR) != 0U)
     {
-        DebugUART_Print("[CAN] DEBUG: frame looped back to can_to_core_queue\r\n");
+        DebugUART_Print("[CAN] RTR frame: no payload bytes\r\n");
+        return;
     }
-#else
-    (void)frame;
-#endif
+
+    DebugUART_Print("[CAN] payload prepared: ");
+    for (uint8_t i = 0; i < frame->Size; i++)
+    {
+        DebugUART_Print("%02X ", (unsigned)frame->Data[i]);
+    }
+    DebugUART_Print("\r\n");
 }
 
 static void CanTask(void *argument)
@@ -149,7 +160,8 @@ static void CanTask(void *argument)
     (void)argument;
 
     can_msg_t can_msg;
-    can_tx_debug_header_t tx_hdr;
+    FDCAN_TxHeaderTypeDef tx_hdr;
+    uint8_t tx_data[8];
 
     DebugUART_Print("[CAN] CanTask started\r\n");
     DebugUART_Print("[CAN] core_to_can_queue=%p can_to_core_queue=%p\r\n",
@@ -160,33 +172,78 @@ static void CanTask(void *argument)
     {
         if (osMessageQueueGet(core_to_can_queue, &can_msg, NULL, osWaitForever) == osOK)
         {
+            memset(&tx_hdr, 0, sizeof(tx_hdr));
+            memset(tx_data, 0, sizeof(tx_data));
+
             CanTask_PrintInputFrame(&can_msg.frame);
 
             if (CanTask_BuildTxHeader(&can_msg.frame, &tx_hdr) != 0)
             {
-                DebugUART_Print("[CAN] ERROR: failed to build TX header\r\n");
+                DebugUART_Print("[CAN] ERROR: failed to build FDCAN TX header\r\n");
                 continue;
             }
 
+            memcpy(tx_data, can_msg.frame.Data, can_msg.frame.Size);
+
             CanTask_PrintTxHeader(&tx_hdr);
+            CanTask_PrintPayload(&can_msg.frame);
 
-            if ((can_msg.frame.Flags & CAN_FLAG_RTR) == 0U)
+            if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_hdr, tx_data) != HAL_OK)
             {
-                DebugUART_Print("[CAN] payload prepared: ");
-                for (uint8_t i = 0; i < can_msg.frame.Size; i++)
+                uint32_t err = HAL_FDCAN_GetError(&hfdcan1);
+                DebugUART_Print("[CAN] ERROR: HAL_FDCAN_AddMessageToTxFifoQ failed, err=0x%08lX\r\n",
+                                (unsigned long)err);
+                continue;
+            }
+
+            DebugUART_Print("[CAN] TX queued into FDCAN FIFO OK\r\n");
+            osDelay(10);
+            DebugUART_Print("[CAN] TXFQS=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->TXFQS);
+            DebugUART_Print("[CAN] RXF0S=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->RXF0S);
+            DebugUART_Print("[CAN] IR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->IR);
+            DebugUART_Print("[CAN] PSR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->PSR);
+
+            uint32_t fill = HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0);
+            DebugUART_Print("[CAN] RX FIFO0 fill level after TX = %lu\r\n", (unsigned long)fill);
+
+            if (fill > 0)
+            {
+                FDCAN_RxHeaderTypeDef rx_hdr_poll;
+                uint8_t rx_data_poll[8] = {0};
+
+                if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &rx_hdr_poll, rx_data_poll) == HAL_OK)
                 {
-                    DebugUART_Print("%02X ", (unsigned)can_msg.frame.Data[i]);
+                    DebugUART_Print("[CAN] POLL RX OK: ID=0x%08lX DLC=0x%08lX DATA=",
+                                    (unsigned long)rx_hdr_poll.Identifier,
+                                    (unsigned long)rx_hdr_poll.DataLength);
+
+                    uint8_t sz = 0;
+                    switch (rx_hdr_poll.DataLength)
+                    {
+                        case FDCAN_DLC_BYTES_0: sz = 0; break;
+                        case FDCAN_DLC_BYTES_1: sz = 1; break;
+                        case FDCAN_DLC_BYTES_2: sz = 2; break;
+                        case FDCAN_DLC_BYTES_3: sz = 3; break;
+                        case FDCAN_DLC_BYTES_4: sz = 4; break;
+                        case FDCAN_DLC_BYTES_5: sz = 5; break;
+                        case FDCAN_DLC_BYTES_6: sz = 6; break;
+                        case FDCAN_DLC_BYTES_7: sz = 7; break;
+                        case FDCAN_DLC_BYTES_8: sz = 8; break;
+                        default: sz = 0; break;
+                    }
+
+                    for (uint8_t i = 0; i < sz; i++)
+                    {
+                        DebugUART_Print("%02X ", rx_data_poll[i]);
+                    }
+                    DebugUART_Print("\r\n");
                 }
-                DebugUART_Print("\r\n");
-            }
-            else
-            {
-                DebugUART_Print("[CAN] RTR frame: no payload bytes\r\n");
+                else
+                {
+                    DebugUART_Print("[CAN] POLL RX FAILED\r\n");
+                }
             }
 
-            DebugUART_Print("[CAN] TEMP: frame is ready for future HAL_FDCAN_AddMessageToTxFifoQ()\r\n");
-
-            CanTask_DebugLoopbackToCore(&can_msg.frame);
         }
     }
 }
@@ -209,4 +266,115 @@ void CanTask_Start(void)
     {
         DebugUART_Print("[CAN] task created\r\n");
     }
+}
+
+static int CanTask_FdcanRxToCanFrame(const FDCAN_RxHeaderTypeDef *rx_hdr,
+                                     const uint8_t *rx_data,
+                                     can_frame_t *out_frame)
+{
+    if ((rx_hdr == NULL) || (out_frame == NULL))
+    {
+        return -1;
+    }
+
+    memset(out_frame, 0, sizeof(*out_frame));
+
+    out_frame->Id = rx_hdr->Identifier;
+    out_frame->Timestamp = 0U;
+
+    if (rx_hdr->IdType == FDCAN_EXTENDED_ID)
+    {
+        out_frame->Flags |= CAN_FLAG_EXTENDED;
+    }
+
+    if (rx_hdr->RxFrameType == FDCAN_REMOTE_FRAME)
+    {
+        out_frame->Flags |= CAN_FLAG_RTR;
+    }
+
+    switch (rx_hdr->DataLength)
+    {
+        case FDCAN_DLC_BYTES_0: out_frame->Size = 0; break;
+        case FDCAN_DLC_BYTES_1: out_frame->Size = 1; break;
+        case FDCAN_DLC_BYTES_2: out_frame->Size = 2; break;
+        case FDCAN_DLC_BYTES_3: out_frame->Size = 3; break;
+        case FDCAN_DLC_BYTES_4: out_frame->Size = 4; break;
+        case FDCAN_DLC_BYTES_5: out_frame->Size = 5; break;
+        case FDCAN_DLC_BYTES_6: out_frame->Size = 6; break;
+        case FDCAN_DLC_BYTES_7: out_frame->Size = 7; break;
+        case FDCAN_DLC_BYTES_8: out_frame->Size = 8; break;
+        default:
+            return -1;
+    }
+
+    if (((out_frame->Flags & CAN_FLAG_RTR) == 0U) && (rx_data != NULL))
+    {
+        memcpy(out_frame->Data, rx_data, out_frame->Size);
+    }
+
+    return 0;
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+    FDCAN_RxHeaderTypeDef rx_hdr;
+    uint8_t rx_data[8];
+    can_msg_t can_msg;
+
+    DebugUART_Print("[CAN-RX] callback entered, ITs=0x%08lX\r\n", (unsigned long)RxFifo0ITs);
+
+    if (hfdcan->Instance != FDCAN1)
+    {
+        DebugUART_Print("[CAN-RX] wrong instance\r\n");
+        return;
+    }
+
+    if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
+    {
+        DebugUART_Print("[CAN-RX] no NEW_MESSAGE flag\r\n");
+        return;
+    }
+
+    memset(&rx_hdr, 0, sizeof(rx_hdr));
+    memset(rx_data, 0, sizeof(rx_data));
+    memset(&can_msg, 0, sizeof(can_msg));
+
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rx_hdr, rx_data) != HAL_OK)
+    {
+        DebugUART_Print("[CAN-RX] HAL_FDCAN_GetRxMessage failed\r\n");
+        return;
+    }
+
+    DebugUART_Print("[CAN-RX] got frame: ID=0x%08lX DLC=0x%08lX type=%s idtype=%s\r\n",
+                    (unsigned long)rx_hdr.Identifier,
+                    (unsigned long)rx_hdr.DataLength,
+                    (rx_hdr.RxFrameType == FDCAN_REMOTE_FRAME) ? "RTR" : "DATA",
+                    (rx_hdr.IdType == FDCAN_EXTENDED_ID) ? "EXT" : "STD");
+
+    if (CanTask_FdcanRxToCanFrame(&rx_hdr, rx_data, &can_msg.frame) != 0)
+    {
+        DebugUART_Print("[CAN-RX] convert failed\r\n");
+        return;
+    }
+
+    DebugUART_Print("[CAN-RX] payload: ");
+    for (uint8_t i = 0; i < can_msg.frame.Size; i++)
+    {
+        DebugUART_Print("%02X ", can_msg.frame.Data[i]);
+    }
+    DebugUART_Print("\r\n");
+
+    if (can_to_core_queue == NULL)
+    {
+        DebugUART_Print("[CAN-RX] can_to_core_queue is NULL\r\n");
+        return;
+    }
+
+    if (osMessageQueuePut(can_to_core_queue, &can_msg, 0, 0) != osOK)
+    {
+        DebugUART_Print("[CAN-RX] queue put failed\r\n");
+        return;
+    }
+
+    DebugUART_Print("[CAN-RX] queued to can_to_core_queue OK\r\n");
 }
