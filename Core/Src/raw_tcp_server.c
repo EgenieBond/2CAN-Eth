@@ -87,7 +87,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb,
         const uint8_t *data = (const uint8_t *)q->payload;
         const uint16_t len  = q->len;
 
-        DebugUART_Print("[TCP] RX chunk len=%u\r\n", (unsigned)len);
+        //DebugUART_Print("[TCP] RX chunk len=%u\r\n", (unsigned)len);
 
         /* Передаем байты в pipeline */
         ClientHandler_InputBytes(data, len);

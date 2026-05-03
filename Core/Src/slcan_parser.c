@@ -14,6 +14,96 @@ static int Slcan_IsValidBitrateCode(char c)
     return (c >= '0' && c <= '8');
 }
 
+static int Slcan_BitrateCodeToBps(uint8_t code, uint32_t *bps)
+{
+    if (bps == NULL)
+        return -1;
+
+    switch (code)
+    {
+        case 0: *bps = 10000U;   return 0;
+        case 1: *bps = 20000U;   return 0;
+        case 2: *bps = 50000U;   return 0;
+        case 3: *bps = 100000U;  return 0;
+        case 4: *bps = 125000U;  return 0;
+        case 5: *bps = 250000U;  return 0;
+        case 6: *bps = 500000U;  return 0;
+        case 7: *bps = 800000U;  return 0;
+        case 8: *bps = 1000000U; return 0;
+        default: return -1;
+    }
+}
+
+static int Slcan_ParseDecimalUint32(const char *str, size_t len, uint32_t *out)
+{
+    uint32_t value = 0;
+
+    if ((str == NULL) || (out == NULL) || (len == 0U))
+        return -1;
+
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = str[i];
+
+        if ((c < '0') || (c > '9'))
+            return -1;
+
+        value = (value * 10U) + (uint32_t)(c - '0');
+    }
+
+    *out = value;
+    return 0;
+}
+
+static int Slcan_ParseBitrateCommand(const char *cmd, slcan_cmd_t *out)
+{
+    size_t len;
+
+    if ((cmd == NULL) || (out == NULL))
+        return -1;
+
+    len = strlen(cmd);
+
+    /* Минимум: "S0\r" */
+    if (len < 3U)
+        return -1;
+
+    if (cmd[0] != 'S')
+        return -1;
+
+    if (cmd[len - 1U] != '\r')
+        return -1;
+
+    /* Вариант 1: классический код S0..S8 */
+    if ((len == 3U) && Slcan_IsValidBitrateCode(cmd[1]))
+    {
+        uint8_t code = (uint8_t)(cmd[1] - '0');
+        uint32_t bps = 0;
+
+        if (Slcan_BitrateCodeToBps(code, &bps) != 0)
+            return -1;
+
+        out->type = SLCAN_CMD_SET_BITRATE;
+        out->bitrate_code = code;
+        out->bitrate_bps = bps;
+        return 0;
+    }
+
+    /* Вариант 2: прямой битрейт, например S125000\r */
+    {
+        uint32_t bps = 0;
+        size_t digits_len = len - 2U; /* без 'S' и '\r' */
+
+        if (Slcan_ParseDecimalUint32(&cmd[1], digits_len, &bps) != 0)
+            return -1;
+
+        out->type = SLCAN_CMD_SET_BITRATE;
+        out->bitrate_code = 0xFFU; /* специальное значение: не S0..S8 */
+        out->bitrate_bps = bps;
+        return 0;
+    }
+}
+
 static int Slcan_HexCharToNibble(char c, uint8_t *out)
 {
     if (!out)
@@ -248,14 +338,12 @@ int Slcan_ParseCommand(const char *cmd, slcan_cmd_t *out)
         return 0;
     }
 
-    if ((cmd[0] == 'S') &&
-        Slcan_IsValidBitrateCode(cmd[1]) &&
-        (cmd[2] == '\r') &&
-        (cmd[3] == '\0'))
+    if (cmd[0] == 'S')
     {
-        out->type = SLCAN_CMD_SET_BITRATE;
-        out->bitrate_code = (uint8_t)(cmd[1] - '0');
-        return 0;
+        if (Slcan_ParseBitrateCommand(cmd, out) == 0)
+            return 0;
+
+        return -1;
     }
 
     if (cmd[0] == 't')

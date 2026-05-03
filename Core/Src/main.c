@@ -298,14 +298,10 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
 
-  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  DebugUART_Print("[FDCAN] started OK\r\n");
-  DebugUART_Print("[FDCAN] PSR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->PSR);
-  DebugUART_Print("[FDCAN] CCCR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->CCCR);
-  DebugUART_Print("[FDCAN] NBTP=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->NBTP);
+  //DebugUART_Print("[FDCAN] init OK, controller not started yet\r\n");
+  //DebugUART_Print("[FDCAN] PSR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->PSR);
+  //DebugUART_Print("[FDCAN] CCCR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->CCCR);
+  //DebugUART_Print("[FDCAN] NBTP=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->NBTP);
 
   /* USER CODE END FDCAN1_Init 2 */
 

@@ -1,8 +1,8 @@
 ../Core/Src/main.c:80:5:main	1
 ../Core/Src/main.c:160:6:SystemClock_Config	4
-../Core/Src/main.c:203:13:MX_FDCAN1_Init	7
-../Core/Src/main.c:319:13:MX_USART3_UART_Init	5
-../Core/Src/main.c:369:13:MX_GPIO_Init	1
-../Core/Src/main.c:412:6:StartDefaultTask	1
-../Core/Src/main.c:447:6:MPU_Config	2
-../Core/Src/main.c:509:6:Error_Handler	1
+../Core/Src/main.c:203:13:MX_FDCAN1_Init	6
+../Core/Src/main.c:315:13:MX_USART3_UART_Init	5
+../Core/Src/main.c:365:13:MX_GPIO_Init	1
+../Core/Src/main.c:408:6:StartDefaultTask	1
+../Core/Src/main.c:443:6:MPU_Config	2
+../Core/Src/main.c:505:6:Error_Handler	1

@@ -1,5 +1,6 @@
-../Core/Src/core_task.c:45:13:CoreTask_HandleEthCommand	20
-../Core/Src/core_task.c:210:20:CoreTask_CmdTypeToStr	7
-../Core/Src/core_task.c:224:13:CoreTask_HandleCanRx	5
-../Core/Src/core_task.c:270:13:CoreTask	3
-../Core/Src/core_task.c:301:6:CoreTask_Start	2
+../Core/Src/core_task.c:44:13:CoreTask_PrintBitrate	2
+../Core/Src/core_task.c:61:13:CoreTask_HandleEthCommand	22
+../Core/Src/core_task.c:274:20:CoreTask_CmdTypeToStr	7
+../Core/Src/core_task.c:288:13:CoreTask_HandleCanRx	4
+../Core/Src/core_task.c:336:13:CoreTask	3
+../Core/Src/core_task.c:367:6:CoreTask_Start	2
