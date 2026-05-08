@@ -53,10 +53,10 @@ extern "C" {
 #define LWIP_ETHERNET                     1
 #define LWIP_DNS_SECURE                   7
 
-#define TCP_SND_QUEUELEN                  9
-#define TCP_SNDLOWAT                      1071
-#define TCP_SNDQUEUELOWAT                 5
-#define TCP_WND_UPDATE_THRESHOLD          536
+#define TCP_SND_QUEUELEN                  (4 * TCP_SND_BUF / TCP_MSS)
+#define TCP_SNDLOWAT                      (4 * TCP_MSS)
+#define TCP_SNDQUEUELOWAT                 16
+#define TCP_WND_UPDATE_THRESHOLD          (TCP_WND / 4)
 
 #define LWIP_NETIF_LINK_CALLBACK          1
 #define TCPIP_THREAD_STACKSIZE            8192
@@ -96,18 +96,18 @@ extern "C" {
 #define IP_REASS_MAX_PBUFS              0
 
 /* ===== Static IPv4 ===== */
-#define IP_ADDR0                          10
-#define IP_ADDR1                          0
+#define IP_ADDR0                          192
+#define IP_ADDR1                          168
 #define IP_ADDR2                          0
-#define IP_ADDR3                          100
+#define IP_ADDR3                          17
 
 #define NETMASK_ADDR0                     255
 #define NETMASK_ADDR1                     255
 #define NETMASK_ADDR2                     255
 #define NETMASK_ADDR3                     0
 
-#define GW_ADDR0                          10
-#define GW_ADDR1                          0
+#define GW_ADDR0                          192
+#define GW_ADDR1                          168
 #define GW_ADDR2                          0
 #define GW_ADDR3                          1
 
@@ -140,8 +140,11 @@ extern "C" {
 #define MEMP_NUM_SYS_TIMEOUT              10
 
 #define TCP_MSS                           1460
-#define TCP_SND_BUF                       (4 * TCP_MSS)
-#define TCP_WND                           (4 * TCP_MSS)
+#define TCP_SND_BUF                       (8 * TCP_MSS)
+#define TCP_WND                           (8 * TCP_MSS)
+
+#define PBUF_POOL_SIZE                    20
+#define PBUF_POOL_BUFSIZE                 1536
 
 /* ===== ARP ===== */
 #define ARP_TABLE_SIZE                    10

@@ -1,5 +1,12 @@
-../Core/Src/client_handler.c:26:13:ClientHandler_SendCmdToCore	88	static
-../Core/Src/client_handler.c:42:6:ClientHandler_InputBytes	24	static
-../Core/Src/client_handler.c:68:6:ClientHandler_PollTx	80	static
-../Core/Src/client_handler.c:94:13:ClientHandlerTask	16	static
-../Core/Src/client_handler.c:114:6:ClientHandlerTask_Start	48	static
+../Core/Src/client_handler.c:74:17:ClientHandler_RxRingUsed	4	static
+../Core/Src/client_handler.c:84:17:ClientHandler_RxRingFree	8	static
+../Core/Src/client_handler.c:89:13:ClientHandler_RxRingWriteByte	16	static
+../Core/Src/client_handler.c:95:16:ClientHandler_RxRingReadByte	16	static
+../Core/Src/client_handler.c:102:12:ClientHandler_PushCmdToRxRing	32	static
+../Core/Src/client_handler.c:153:12:ClientHandler_PopCmdFromRxRing	48	static
+../Core/Src/client_handler.c:233:13:ClientHandler_DrainRxCmdsToCore	88	static
+../Core/Src/client_handler.c:283:6:ClientHandler_InputBytes	24	static
+../Core/Src/client_handler.c:319:16:ClientHandler_BuildTxBatch	112	static
+../Core/Src/client_handler.c:383:6:ClientHandler_PollTx	1048	static
+../Core/Src/client_handler.c:425:13:ClientHandlerTask	16	static
+../Core/Src/client_handler.c:457:6:ClientHandlerTask_Start	48	static

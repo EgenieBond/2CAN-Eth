@@ -163,21 +163,16 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  uint32_t timeout = HAL_GetTick();
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY))
-  {
-    if ((HAL_GetTick() - timeout) > 1000)
-    {
-      Error_Handler();
-    }
-  }
+  __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_HSE);
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
 
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -185,9 +180,9 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              | RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              | RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
+                              | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
@@ -222,29 +217,37 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
-  hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 16;
+  hfdcan1.Init.ProtocolException = ENABLE;
+
+  hfdcan1.Init.NominalPrescaler = 10;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 12;
+  hfdcan1.Init.NominalTimeSeg2 = 7;
+
   hfdcan1.Init.DataPrescaler = 1;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
   hfdcan1.Init.DataTimeSeg2 = 1;
   hfdcan1.Init.MessageRAMOffset = 0;
-  hfdcan1.Init.StdFiltersNbr = 0;
-  hfdcan1.Init.ExtFiltersNbr = 0;
-  hfdcan1.Init.RxFifo0ElmtsNbr = 8;
+
+  hfdcan1.Init.StdFiltersNbr = 1;
+  hfdcan1.Init.ExtFiltersNbr = 1; //extended or standard
+
+  hfdcan1.Init.RxFifo0ElmtsNbr = 1;
   hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.RxFifo1ElmtsNbr = 0;
+
+  hfdcan1.Init.RxFifo1ElmtsNbr = 2;
   hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+
   hfdcan1.Init.RxBuffersNbr = 0;
   hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.TxEventsNbr = 0;
+
+  hfdcan1.Init.TxEventsNbr = 1;
   hfdcan1.Init.TxBuffersNbr = 0;
-  hfdcan1.Init.TxFifoQueueElmtsNbr = 3;
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 1;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
   {
     Error_Handler();
@@ -265,7 +268,8 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
 
-  /* Extended IDs -> RX FIFO0 */
+  /*
+  // Extended IDs -> RX FIFO0
   sFilter.IdType = FDCAN_EXTENDED_ID;
   sFilter.FilterIndex = 0;
   sFilter.FilterType = FDCAN_FILTER_MASK;
@@ -276,7 +280,7 @@ static void MX_FDCAN1_Init(void)
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilter) != HAL_OK)
   {
     Error_Handler();
-  }
+  }*/
 
   if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
                                    FDCAN_ACCEPT_IN_RX_FIFO0,
@@ -287,15 +291,24 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
 
+
+  if (HAL_FDCAN_ConfigInterruptLines(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                     FDCAN_INTERRUPT_LINE0) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
   if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
   {
     Error_Handler();
   }
 
-  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  //DebugUART_Print("[FDCAN] init OK, controller not started yet\r\n");
+  //DebugUART_Print("[FDCAN] PSR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->PSR);
+  //DebugUART_Print("[FDCAN] CCCR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->CCCR);
+  //DebugUART_Print("[FDCAN] NBTP=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->NBTP);
+
   /* USER CODE END FDCAN1_Init 2 */
 
 }
@@ -357,35 +370,25 @@ static void MX_USART3_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-  /* Здесь НЕ настраиваем USART3!
-     Его GPIO конфигурируются в HAL_UART_MspInit()
-     (PD8 = TX, PD9 = RX)
-  */
-/* USER CODE END MX_GPIO_Init_1 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* Если нужны другие пользовательские GPIO — настраивай здесь */
-
-  /* Пример: LED PB0 (если используешь) */
   /*
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
+   * PB0 — как в рабочем CAN-проекте.
+   * Скорее всего, это EN/STB/Silent управление CAN-трансивером.
+   */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
 
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-  */
-
-/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -414,12 +417,13 @@ void StartDefaultTask(void *argument)
   MX_LWIP_Init();
 
   /* init FDCAN before CAN task start */
-  //MX_FDCAN1_Init();
+  MX_FDCAN1_Init();
+  DebugUART_Print("[BOOT] after FDCAN1 init\r\n");
 
   /* pipeline */
   EthApp_Init();
   CoreTask_Start();
-  //CanTask_Start();
+  CanTask_Start();
 
   /* Ethernet app task */
   EthernetTask_Start();

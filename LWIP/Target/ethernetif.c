@@ -681,15 +681,18 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   * @param  handlerEth: ETH handler
   * @retval None
   */
+volatile uint32_t g_eth_dma_error_count = 0;
+volatile uint32_t g_eth_dma_last_error = 0;
+volatile uint32_t g_eth_hal_last_error = 0;
+
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
   uint32_t dma_err = HAL_ETH_GetDMAError(handlerEth);
-  (void)handlerEth;
 
   g_tx_err_cnt++;
-  DebugUART_Print("[ETH] DMA error: hal_err=0x%08lX dma_err=0x%08lX\r\n",
-                  (unsigned long)HAL_ETH_GetError(&heth),
-                  (unsigned long)dma_err);
+  g_eth_dma_error_count++;
+  g_eth_dma_last_error = dma_err;
+  g_eth_hal_last_error = HAL_ETH_GetError(handlerEth);
 
   osSemaphoreRelease(TxPktSemaphore);
 
@@ -789,7 +792,7 @@ static void low_level_init(struct netif *netif)
   memset(&attributes, 0, sizeof(attributes));
   attributes.name = "EthIf";
   attributes.stack_size = 4096;
-  attributes.priority = osPriorityBelowNormal;
+  attributes.priority = osPriorityAboveNormal;
   osThreadNew(ethernetif_input, netif, &attributes);
 
   /* PHY init */
