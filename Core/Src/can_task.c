@@ -10,138 +10,382 @@
 #include "app_queues.h"
 #include "debug_uart.h"
 #include "can_types.h"
+#include "main.h"
+
 #include <string.h>
 #include <stdint.h>
 
 static osThreadId_t canTaskHandle = NULL;
+extern FDCAN_HandleTypeDef hfdcan1;
 
-/* Значения сделаны в стиле будущего FDCAN,
-   чтобы потом было легко перейти на HAL */
-#define CAN_TX_ID_STANDARD   0U
-#define CAN_TX_ID_EXTENDED   1U
-
-#define CAN_TX_FRAME_DATA    0U
-#define CAN_TX_FRAME_RTR     1U
-
-/* Временная программная имитация входящего CAN-кадра */
-#define CAN_DEBUG_LOOPBACK_TO_CORE  1
+static uint8_t g_can_started = 0;
+static volatile uint32_t g_can_rx_irq_count = 0;
+static volatile uint32_t g_can_rx_ok_count = 0;
+static volatile uint32_t g_can_rx_queue_drop_count = 0;
 
 typedef struct
 {
-    uint32_t Identifier;
-    uint32_t IdType;
-    uint32_t TxFrameType;
-    uint32_t DataLength;
-} can_tx_debug_header_t;
+    uint32_t prescaler;
+    uint32_t sjw;
+    uint32_t tseg1;
+    uint32_t tseg2;
+} can_bittiming_t;
 
-static const char *CanTask_IdTypeToStr(uint32_t id_type)
-{
-    return (id_type == CAN_TX_ID_EXTENDED) ? "EXTENDED" : "STANDARD";
-}
+static int CanTask_BuildTxHeader(const can_frame_t *frame, FDCAN_TxHeaderTypeDef *hdr);
+static int CanTask_GetBitTiming(uint32_t bitrate_bps, can_bittiming_t *bt);
+static int CanTask_ApplyBitrate(uint32_t bitrate_bps);
+static int CanTask_FdcanRxToCanFrame(const FDCAN_RxHeaderTypeDef *rx_hdr,
+                                     const uint8_t *rx_data,
+                                     can_frame_t *out_frame);
+static void CanTask(void *argument);
+static void CanTask_PrintTxState(const char *tag);
 
-static const char *CanTask_FrameTypeToStr(uint32_t frame_type)
+static int CanTask_BuildTxHeader(const can_frame_t *frame, FDCAN_TxHeaderTypeDef *hdr)
 {
-    return (frame_type == CAN_TX_FRAME_RTR) ? "RTR" : "DATA";
-}
-
-static int CanTask_BuildTxHeader(const can_frame_t *frame, can_tx_debug_header_t *hdr)
-{
-    if (!frame || !hdr)
+    if ((frame == NULL) || (hdr == NULL))
+    {
         return -1;
+    }
 
     if (frame->Size > 8U)
+    {
         return -1;
+    }
 
     memset(hdr, 0, sizeof(*hdr));
 
     hdr->Identifier = frame->Id;
-    hdr->DataLength = frame->Size;
 
-    if (frame->Flags & CAN_FLAG_EXTENDED)
+    if ((frame->Flags & CAN_FLAG_EXTENDED) != 0U)
     {
-        hdr->IdType = CAN_TX_ID_EXTENDED;
+        hdr->IdType = FDCAN_EXTENDED_ID;
     }
     else
     {
         if (frame->Id > 0x7FFU)
+        {
             return -1;
+        }
 
-        hdr->IdType = CAN_TX_ID_STANDARD;
+        hdr->IdType = FDCAN_STANDARD_ID;
     }
 
-    if (frame->Flags & CAN_FLAG_RTR)
+    hdr->TxFrameType = FDCAN_DATA_FRAME;
+
+    switch (frame->Size)
     {
-        hdr->TxFrameType = CAN_TX_FRAME_RTR;
+        case 0: hdr->DataLength = FDCAN_DLC_BYTES_0; break;
+        case 1: hdr->DataLength = FDCAN_DLC_BYTES_1; break;
+        case 2: hdr->DataLength = FDCAN_DLC_BYTES_2; break;
+        case 3: hdr->DataLength = FDCAN_DLC_BYTES_3; break;
+        case 4: hdr->DataLength = FDCAN_DLC_BYTES_4; break;
+        case 5: hdr->DataLength = FDCAN_DLC_BYTES_5; break;
+        case 6: hdr->DataLength = FDCAN_DLC_BYTES_6; break;
+        case 7: hdr->DataLength = FDCAN_DLC_BYTES_7; break;
+        case 8: hdr->DataLength = FDCAN_DLC_BYTES_8; break;
+        default:
+            return -1;
     }
-    else
-    {
-        hdr->TxFrameType = CAN_TX_FRAME_DATA;
-    }
+
+    /*
+     * Поля TxHeader сделаны как в прошивке Славы.
+     */
+    hdr->ErrorStateIndicator = FDCAN_ESI_PASSIVE;
+    hdr->BitRateSwitch = FDCAN_BRS_OFF;
+    hdr->FDFormat = FDCAN_CLASSIC_CAN;
+    hdr->TxEventFifoControl = FDCAN_STORE_TX_EVENTS;
+    hdr->MessageMarker = 0xDD;
 
     return 0;
 }
 
-static void CanTask_PrintInputFrame(const can_frame_t *frame)
+static int CanTask_GetBitTiming(uint32_t bitrate_bps, can_bittiming_t *bt)
 {
-    if (!frame)
-        return;
-
-    if (frame->Flags & CAN_FLAG_RTR)
+    if (bt == NULL)
     {
-        DebugUART_Print("[CAN] frame from CORE: RTR ID=0x%08lX DLC=%u FLAGS=0x%02X\r\n",
-                        (unsigned long)frame->Id,
-                        (unsigned)frame->Size,
-                        (unsigned)frame->Flags);
+        return -1;
     }
-    else
-    {
-        DebugUART_Print("[CAN] frame from CORE: DATA ID=0x%08lX DLC=%u FLAGS=0x%02X DATA=",
-                        (unsigned long)frame->Id,
-                        (unsigned)frame->Size,
-                        (unsigned)frame->Flags);
 
-        for (uint8_t i = 0; i < frame->Size; i++)
+    memset(bt, 0, sizeof(*bt));
+
+    /*
+     * Основные рабочие скорости:
+     *   S6 = 500 кбит/с
+     *   S8 = 1 Мбит/с
+     */
+
+    /*
+     * CAN bitrate = FDCAN kernel clock / (Prescaler × (1 + TimeSeg1 + TimeSeg2))
+     * 1 CAN bit = Sync segment + TimeSeg1 + TimeSeg2
+     */
+
+    switch (bitrate_bps)
+    {
+        case 500000U:
+            /* для ~500 кбит/с.   */
+            bt->prescaler = 1;   // делитель тактовой частоты FDCAN
+            bt->sjw       = 13;  // насколько контроллер может подстраивать синхронизацию
+            bt->tseg1     = 86;  // первая часть бита
+            bt->tseg2     = 13;  // вторая часть бита
+            return 0;
+            // 1 + 86 + 13 = 100 - Количество временных квантов
+            // 50 000 000 / (1 × 100) = 500 000 бит/с  - Если FDCAN kernel clock считается как 50 МГц
+
+        case 1000000U:
+        	/* для 1 Мбит/с.   */
+            bt->prescaler = 1;
+            bt->sjw       = 1;
+            bt->tseg1     = 48;
+            bt->tseg2     = 1;
+            return 0;
+            // 1 + 48 + 1 = 50
+            // 50 000 000 / (1 × 50) = 1 000 000 бит/с
+
+        default:
+            /*
+             * Остальные скорости специально не включаем,
+             * потому что эталонная прошивка предприятия была проверена
+             * именно на этих настройках.
+             */
+            return -1;
+    }
+}
+
+static int CanTask_ApplyBitrate(uint32_t bitrate_bps)
+{
+    can_bittiming_t bt;
+
+    if (CanTask_GetBitTiming(bitrate_bps, &bt) != 0)
+    {
+        DebugUART_Print("[CAN] ERROR: unsupported bitrate %lu bit/s\r\n",
+                        (unsigned long)bitrate_bps);
+        return -1;
+    }
+
+    hfdcan1.Init.NominalPrescaler     = bt.prescaler;
+    hfdcan1.Init.NominalSyncJumpWidth = bt.sjw;
+    hfdcan1.Init.NominalTimeSeg1      = bt.tseg1;
+    hfdcan1.Init.NominalTimeSeg2      = bt.tseg2;
+
+    DebugUART_Print("[CAN] bitrate applied: %lu bit/s -> Presc=%lu SJW=%lu TSEG1=%lu TSEG2=%lu\r\n",
+                    (unsigned long)bitrate_bps,
+                    (unsigned long)bt.prescaler,
+                    (unsigned long)bt.sjw,
+                    (unsigned long)bt.tseg1,
+                    (unsigned long)bt.tseg2);
+
+    return 0;
+}
+
+int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
+{
+    FDCAN_FilterTypeDef sFilterConfig;
+    can_bittiming_t bt;
+
+    if (g_can_started)
+    {
+        if (HAL_FDCAN_Stop(&hfdcan1) != HAL_OK)
         {
-            DebugUART_Print("%02X ", (unsigned)frame->Data[i]);
+            DebugUART_Print("[CAN] ERROR: HAL_FDCAN_Stop failed before reopen\r\n");
+            return -1;
         }
-        DebugUART_Print("\r\n");
+
+        g_can_started = 0;
+        DebugUART_Print("[CAN] controller stopped before reopen\r\n");
     }
-}
 
-static void CanTask_PrintTxHeader(const can_tx_debug_header_t *hdr)
-{
-    if (!hdr)
-        return;
-
-    DebugUART_Print("[CAN] TX header prepared:\r\n");
-    DebugUART_Print("[CAN]   IdType     = %s\r\n", CanTask_IdTypeToStr(hdr->IdType));
-    DebugUART_Print("[CAN]   Identifier = 0x%08lX\r\n", (unsigned long)hdr->Identifier);
-    DebugUART_Print("[CAN]   FrameType  = %s\r\n", CanTask_FrameTypeToStr(hdr->TxFrameType));
-    DebugUART_Print("[CAN]   DataLength = %lu\r\n", (unsigned long)hdr->DataLength);
-}
-
-static void CanTask_DebugLoopbackToCore(const can_frame_t *frame)
-{
-#if CAN_DEBUG_LOOPBACK_TO_CORE
-    can_msg_t rx_msg;
-
-    if (!frame)
-        return;
-
-    memset(&rx_msg, 0, sizeof(rx_msg));
-    rx_msg.frame = *frame;
-
-    if (osMessageQueuePut(can_to_core_queue, &rx_msg, 0, 0) != osOK)
+    if (CanTask_GetBitTiming(bitrate_bps, &bt) != 0)
     {
-        DebugUART_Print("[CAN] ERROR: can_to_core_queue full (debug loopback)\r\n");
+        DebugUART_Print("[CAN] ERROR: unsupported bitrate %lu bit/s\r\n",
+                        (unsigned long)bitrate_bps);
+        return -1;
+    }
+
+    /*
+     * Применяем тайминги.
+     */
+    hfdcan1.Init.NominalPrescaler     = bt.prescaler;
+    hfdcan1.Init.NominalSyncJumpWidth = bt.sjw;
+    hfdcan1.Init.NominalTimeSeg1      = bt.tseg1;
+    hfdcan1.Init.NominalTimeSeg2      = bt.tseg2;
+
+    /*
+     * Data phase — как в эталонной прошивке.
+     * Для 500 кбит/с в эталоне был другой DataPrescaler.
+     * Но так как используется Classic CAN, это не критично.
+     */
+    if (bitrate_bps == 500000U)
+    {
+        hfdcan1.Init.DataPrescaler = 25;
+        hfdcan1.Init.DataSyncJumpWidth = 1;
+        hfdcan1.Init.DataTimeSeg1 = 2;
+        hfdcan1.Init.DataTimeSeg2 = 1;
     }
     else
     {
-        DebugUART_Print("[CAN] DEBUG: frame looped back to can_to_core_queue\r\n");
+        hfdcan1.Init.DataPrescaler = 13;
+        hfdcan1.Init.DataSyncJumpWidth = 1;
+        hfdcan1.Init.DataTimeSeg1 = 2;
+        hfdcan1.Init.DataTimeSeg2 = 1;
     }
-#else
-    (void)frame;
-#endif
+
+    switch (mode)
+    {
+        case CORE_CAN_MODE_NORMAL:
+            hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+            break;
+
+        case CORE_CAN_MODE_LISTEN_ONLY:
+            hfdcan1.Init.Mode = FDCAN_MODE_BUS_MONITORING;
+            break;
+
+        case CORE_CAN_MODE_SELF_RECEPTION:
+            /*
+             * Для домашней проверки оставляем loopback.
+             * На предприятии для реальной шины используется O/NORMAL.
+             */
+            hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
+            break;
+
+        default:
+            DebugUART_Print("[CAN] ERROR: invalid mode in CanTask_Open\r\n");
+            return -1;
+    }
+
+    if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_Init failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    /*
+     * Фильтр для итогового CAN-Ethernet преобразователя:
+     * принимаем все стандартные CAN ID в RX FIFO0.
+     */
+    memset(&sFilterConfig, 0, sizeof(sFilterConfig));
+
+    sFilterConfig.IdType = FDCAN_STANDARD_ID;
+    sFilterConfig.FilterIndex = 0;
+    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    sFilterConfig.FilterID1 = 0x000;
+    sFilterConfig.FilterID2 = 0x000;
+
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ConfigFilter failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    /*
+     * Extended CAN ID тоже принимаем все в RX FIFO0.
+     */
+    sFilterConfig.IdType = FDCAN_EXTENDED_ID;
+    sFilterConfig.FilterIndex = 0;
+    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    sFilterConfig.FilterID1 = 0x00000000;
+    sFilterConfig.FilterID2 = 0x00000000;
+
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ConfigFilter EXT failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+                                     FDCAN_ACCEPT_IN_RX_FIFO0,
+                                     FDCAN_ACCEPT_IN_RX_FIFO0,
+                                     FDCAN_REJECT_REMOTE,
+                                     FDCAN_REJECT_REMOTE) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ConfigGlobalFilter failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    /*
+     * В эталонной прошивке приём был через polling,
+     * а в твоей архитектуре через callback.
+     * Поэтому добавляем interrupt line + notification.
+     */
+    if (HAL_FDCAN_ConfigInterruptLines(&hfdcan1,
+                                       FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                       FDCAN_INTERRUPT_LINE0) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ConfigInterruptLines failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                       FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                       0) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ActivateNotification failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_Start failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    g_can_started = 1;
+    g_can_rx_irq_count = 0;
+    g_can_rx_ok_count = 0;
+    g_can_rx_queue_drop_count = 0;
+
+    DebugUART_Print("[CAN] RX notification active\r\n");
+
+    DebugUART_Print("[CAN DBG] FDCAN kernel clock=%lu\r\n",
+                    (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_FDCAN));
+
+    DebugUART_Print("[CAN DBG] HAL_RCC_GetHCLKFreq=%lu\r\n",
+                    (unsigned long)HAL_RCC_GetHCLKFreq());
+
+    DebugUART_Print("[CAN DBG] HAL_RCC_GetPCLK1Freq=%lu\r\n",
+                    (unsigned long)HAL_RCC_GetPCLK1Freq());
+
+    DebugUART_Print("[CAN DBG] HAL_RCC_GetPCLK2Freq=%lu\r\n",
+                    (unsigned long)HAL_RCC_GetPCLK2Freq());
+
+    DebugUART_Print("[CAN DBG] FDCAN CCCR=0x%08lX\r\n",
+                    (unsigned long)hfdcan1.Instance->CCCR);
+
+    DebugUART_Print("[CAN DBG] FDCAN NBTP=0x%08lX\r\n",
+                    (unsigned long)hfdcan1.Instance->NBTP);
+
+    DebugUART_Print("[CAN DBG] FDCAN PSR=0x%08lX\r\n",
+                    (unsigned long)hfdcan1.Instance->PSR);
+
+    DebugUART_Print("[CAN DBG] FDCAN ECR=0x%08lX\r\n",
+                    (unsigned long)hfdcan1.Instance->ECR);
+
+    DebugUART_Print("[CAN] channel opened, mode=%lu bitrate=%lu bit/s\r\n",
+                    (unsigned long)hfdcan1.Init.Mode,
+                    (unsigned long)bitrate_bps);
+
+    return 0;
+}
+
+int CanTask_Close(void)
+{
+    if (!g_can_started)
+    {
+        DebugUART_Print("[CAN] close requested, controller already stopped\r\n");
+        return 0;
+    }
+
+    if (HAL_FDCAN_Stop(&hfdcan1) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_Stop failed on close\r\n");
+        return -1;
+    }
+
+    g_can_started = 0;
+
+    DebugUART_Print("[CAN] channel stopped\r\n");
+    return 0;
 }
 
 static void CanTask(void *argument)
@@ -149,7 +393,8 @@ static void CanTask(void *argument)
     (void)argument;
 
     can_msg_t can_msg;
-    can_tx_debug_header_t tx_hdr;
+    FDCAN_TxHeaderTypeDef tx_hdr;
+    uint8_t tx_data[8];
 
     DebugUART_Print("[CAN] CanTask started\r\n");
     DebugUART_Print("[CAN] core_to_can_queue=%p can_to_core_queue=%p\r\n",
@@ -160,33 +405,57 @@ static void CanTask(void *argument)
     {
         if (osMessageQueueGet(core_to_can_queue, &can_msg, NULL, osWaitForever) == osOK)
         {
-            CanTask_PrintInputFrame(&can_msg.frame);
+            memset(&tx_hdr, 0, sizeof(tx_hdr));
+            memset(tx_data, 0, sizeof(tx_data));
 
             if (CanTask_BuildTxHeader(&can_msg.frame, &tx_hdr) != 0)
             {
-                DebugUART_Print("[CAN] ERROR: failed to build TX header\r\n");
+                DebugUART_Print("[CAN] ERROR: failed to build FDCAN TX header\r\n");
                 continue;
             }
 
-            CanTask_PrintTxHeader(&tx_hdr);
+            memcpy(tx_data, can_msg.frame.Data, can_msg.frame.Size);
 
-            if ((can_msg.frame.Flags & CAN_FLAG_RTR) == 0U)
+            /*
+             * В нагрузочном режиме не печатаем каждый кадр в UART,
+             * иначе UART сильно тормозит систему и забивает TCP.
+             */
+
+            if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0U)
             {
-                DebugUART_Print("[CAN] payload prepared: ");
-                for (uint8_t i = 0; i < can_msg.frame.Size; i++)
-                {
-                    DebugUART_Print("%02X ", (unsigned)can_msg.frame.Data[i]);
-                }
-                DebugUART_Print("\r\n");
+                DebugUART_Print("[CAN] ERROR: TX FIFO FULL, frame skipped\r\n");
+                DebugUART_Print("[CAN] TXFQS=0x%08lX PSR=0x%08lX CCCR=0x%08lX\r\n",
+                                (unsigned long)hfdcan1.Instance->TXFQS,
+                                (unsigned long)hfdcan1.Instance->PSR,
+                                (unsigned long)hfdcan1.Instance->CCCR);
+                DebugUART_Print("[CAN DBG] ECR=0x%08lX PSR=0x%08lX TXBRP=0x%08lX TXBTO=0x%08lX TXBCF=0x%08lX\r\n",
+                                (unsigned long)hfdcan1.Instance->ECR,
+                                (unsigned long)hfdcan1.Instance->PSR,
+                                (unsigned long)hfdcan1.Instance->TXBRP,
+                                (unsigned long)hfdcan1.Instance->TXBTO,
+                                (unsigned long)hfdcan1.Instance->TXBCF);
+                continue;
             }
-            else
+
+            if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_hdr, tx_data) != HAL_OK)
             {
-                DebugUART_Print("[CAN] RTR frame: no payload bytes\r\n");
+                uint32_t err = HAL_FDCAN_GetError(&hfdcan1);
+                DebugUART_Print("[CAN] ERROR: HAL_FDCAN_AddMessageToTxFifoQ failed, err=0x%08lX\r\n",
+                                (unsigned long)err);
+                DebugUART_Print("[CAN] TXFQS=0x%08lX PSR=0x%08lX CCCR=0x%08lX\r\n",
+                                (unsigned long)hfdcan1.Instance->TXFQS,
+                                (unsigned long)hfdcan1.Instance->PSR,
+                                (unsigned long)hfdcan1.Instance->CCCR);
+                continue;
             }
+            /* сюда попадаем только если кадр успешно добавлен в TX FIFO */
+            CanTask_PrintTxState("after AddMessage");
 
-            DebugUART_Print("[CAN] TEMP: frame is ready for future HAL_FDCAN_AddMessageToTxFifoQ()\r\n");
+            osDelay(10);
+            CanTask_PrintTxState("after 10ms");
 
-            CanTask_DebugLoopbackToCore(&can_msg.frame);
+            osDelay(100);
+            CanTask_PrintTxState("after 100ms");
         }
     }
 }
@@ -209,4 +478,127 @@ void CanTask_Start(void)
     {
         DebugUART_Print("[CAN] task created\r\n");
     }
+}
+
+static int CanTask_FdcanRxToCanFrame(const FDCAN_RxHeaderTypeDef *rx_hdr,
+                                     const uint8_t *rx_data,
+                                     can_frame_t *out_frame)
+{
+    if ((rx_hdr == NULL) || (out_frame == NULL))
+    {
+        return -1;
+    }
+
+    memset(out_frame, 0, sizeof(*out_frame));
+
+    out_frame->Id = rx_hdr->Identifier;
+    out_frame->Timestamp = 0U;
+
+    if (rx_hdr->IdType == FDCAN_EXTENDED_ID)
+    {
+        out_frame->Flags |= CAN_FLAG_EXTENDED;
+    }
+
+    if (rx_hdr->RxFrameType == FDCAN_REMOTE_FRAME)
+    {
+        out_frame->Flags |= CAN_FLAG_RTR;
+    }
+
+    switch (rx_hdr->DataLength)
+    {
+        case FDCAN_DLC_BYTES_0: out_frame->Size = 0; break;
+        case FDCAN_DLC_BYTES_1: out_frame->Size = 1; break;
+        case FDCAN_DLC_BYTES_2: out_frame->Size = 2; break;
+        case FDCAN_DLC_BYTES_3: out_frame->Size = 3; break;
+        case FDCAN_DLC_BYTES_4: out_frame->Size = 4; break;
+        case FDCAN_DLC_BYTES_5: out_frame->Size = 5; break;
+        case FDCAN_DLC_BYTES_6: out_frame->Size = 6; break;
+        case FDCAN_DLC_BYTES_7: out_frame->Size = 7; break;
+        case FDCAN_DLC_BYTES_8: out_frame->Size = 8; break;
+        default:
+            return -1;
+    }
+
+    if (((out_frame->Flags & CAN_FLAG_RTR) == 0U) && (rx_data != NULL))
+    {
+        memcpy(out_frame->Data, rx_data, out_frame->Size);
+    }
+
+    return 0;
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+    FDCAN_RxHeaderTypeDef rx_hdr;
+    uint8_t rx_data[8];
+    can_msg_t can_msg;
+
+    if (hfdcan == NULL)
+    {
+        return;
+    }
+
+    if (hfdcan->Instance != FDCAN1)
+    {
+        return;
+    }
+
+    if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
+    {
+        return;
+    }
+
+    g_can_rx_irq_count++;
+
+    memset(&rx_hdr, 0, sizeof(rx_hdr));
+    memset(rx_data, 0, sizeof(rx_data));
+    memset(&can_msg, 0, sizeof(can_msg));
+
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rx_hdr, rx_data) != HAL_OK)
+    {
+        return;
+    }
+
+    if (CanTask_FdcanRxToCanFrame(&rx_hdr, rx_data, &can_msg.frame) != 0)
+    {
+        return;
+    }
+
+    if (can_to_core_queue == NULL)
+    {
+        DebugUART_Print("[CAN RX] ERROR: can_to_core_queue=NULL\r\n");
+        return;
+    }
+
+    g_can_rx_ok_count++;
+
+    DebugUART_Print("[CAN RX] ID=0x%08lX DLC=%u FLAGS=0x%02X irq=%lu ok=%lu\r\n",
+                    (unsigned long)can_msg.frame.Id,
+                    (unsigned)can_msg.frame.Size,
+                    (unsigned)can_msg.frame.Flags,
+                    (unsigned long)g_can_rx_irq_count,
+                    (unsigned long)g_can_rx_ok_count);
+
+    /*
+     * В callback нельзя ждать, поэтому кладём без ожидания.
+     */
+    if (osMessageQueuePut(can_to_core_queue, &can_msg, 0, 0) != osOK)
+    {
+        g_can_rx_queue_drop_count++;
+
+        DebugUART_Print("[CAN RX] ERROR: can_to_core_queue full, drops=%lu\r\n",
+                        (unsigned long)g_can_rx_queue_drop_count);
+    }
+}
+
+static void CanTask_PrintTxState(const char *tag)
+{
+    DebugUART_Print("[CAN TX] %s TXFQS=0x%08lX TXBRP=0x%08lX TXBTO=0x%08lX TXBCF=0x%08lX PSR=0x%08lX ECR=0x%08lX\r\n",
+                    tag,
+                    (unsigned long)hfdcan1.Instance->TXFQS,
+                    (unsigned long)hfdcan1.Instance->TXBRP,
+                    (unsigned long)hfdcan1.Instance->TXBTO,
+                    (unsigned long)hfdcan1.Instance->TXBCF,
+                    (unsigned long)hfdcan1.Instance->PSR,
+                    (unsigned long)hfdcan1.Instance->ECR);
 }

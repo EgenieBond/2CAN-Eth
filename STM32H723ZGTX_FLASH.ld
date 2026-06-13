@@ -161,6 +161,17 @@ SECTIONS
     _edata = .;        /* define a global symbol at data end */
   } >RAM_D1 AT> FLASH
 
+	/* ===== LwIP буферы в DTCMRAM ===== */
+	.lwip_data (NOLOAD) :
+	{
+	  . = ALIGN(32);
+	  __lwip_dtcm_start__ = .;
+	  *(.lwip_dtcm)
+	  . = ALIGN(32);
+	  __lwip_dtcm_end__ = .;
+	} >DTCMRAM
+
+
   /* Uninitialized data section */
   . = ALIGN(4);
   .bss :
@@ -178,11 +189,11 @@ SECTIONS
   } >RAM_D1
   
     /* ===== lwIP heap region (must NOT overlap .bss / FreeRTOS heap) ===== */
-  .lwip_heap (NOLOAD) :
+.lwip_heap (NOLOAD) :
 {
   . = ALIGN(32);
   __lwip_heap_start__ = .;
-  . = . + 0x10000;            /* 64 KB */
+  . = . + 0x4000;            /* было 0xC000 (48KB), стало 0x8000 (32KB) */
   __lwip_heap_end__ = .;
   . = ALIGN(32);
 } >RAM_D1

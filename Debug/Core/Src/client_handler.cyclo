@@ -1,5 +1,12 @@
-../Core/Src/client_handler.c:26:13:ClientHandler_SendCmdToCore	2
-../Core/Src/client_handler.c:42:6:ClientHandler_InputBytes	4
-../Core/Src/client_handler.c:68:6:ClientHandler_PollTx	3
-../Core/Src/client_handler.c:94:13:ClientHandlerTask	1
-../Core/Src/client_handler.c:114:6:ClientHandlerTask_Start	2
+../Core/Src/client_handler.c:74:17:ClientHandler_RxRingUsed	2
+../Core/Src/client_handler.c:84:17:ClientHandler_RxRingFree	1
+../Core/Src/client_handler.c:89:13:ClientHandler_RxRingWriteByte	1
+../Core/Src/client_handler.c:95:16:ClientHandler_RxRingReadByte	1
+../Core/Src/client_handler.c:102:12:ClientHandler_PushCmdToRxRing	7
+../Core/Src/client_handler.c:153:12:ClientHandler_PopCmdFromRxRing	9
+../Core/Src/client_handler.c:233:13:ClientHandler_DrainRxCmdsToCore	6
+../Core/Src/client_handler.c:283:6:ClientHandler_InputBytes	5
+../Core/Src/client_handler.c:319:16:ClientHandler_BuildTxBatch	10
+../Core/Src/client_handler.c:383:6:ClientHandler_PollTx	6
+../Core/Src/client_handler.c:425:13:ClientHandlerTask	1
+../Core/Src/client_handler.c:457:6:ClientHandlerTask_Start	2

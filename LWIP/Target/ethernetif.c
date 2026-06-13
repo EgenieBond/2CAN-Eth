@@ -42,6 +42,7 @@
 
 extern struct netif gnetif;
 void invalidate_dcache_range(void *addr, uint32_t size);
+//static void EthTxTask(void *argument);
 static uint8_t g_MACAddr[6] = {0x00,0x80,0xE1,0x00,0x00,0x00};
 //osEventFlagsId_t g_ethLinkEvt = NULL;
 
@@ -177,22 +178,20 @@ lan8742_IOCtx_t  LAN8742_IOCtx = {ETH_PHY_IO_Init,
 #include <stdint.h>
 #include "lwip/netif.h"
 
-//static uint8_t arp_tx_frame[60] __attribute__((aligned(32)));
 static err_t low_level_output(struct netif *netif, struct pbuf *p);
-//static ETH_BufferTypeDef g_TxBuffer[ETH_TX_DESC_CNT] __attribute__((aligned(32)));
-
-//static ETH_BufferTypeDef g_TxBuffer[ETH_TX_DESC_CNT]
-//__attribute__((section(".Rx_PoolSection"), aligned(32)));
-
 /* ===== DEBUG/SAFE TX PATH =====
  * ВРЕМЕННО:
  * кладём TX-буфер в обычную RAM, без специальных секций.
  * D-Cache у нас сейчас отключён, поэтому для отладки это безопасно.
- */
+
 static uint8_t g_TxFrame[1536] __attribute__((aligned(32)));
 static ETH_BufferTypeDef g_TxBuffer __attribute__((aligned(32)));
+ */
 
-// глобальные счётчики
+static uint8_t g_TxFrame[1536] __attribute__((section(".TxDecripSection"), aligned(32)));
+static ETH_BufferTypeDef g_TxBuffer __attribute__((section(".TxDecripSection"), aligned(32)));
+
+/* ===== Глобальные счетчики ===== */
 volatile uint32_t g_eth_irq_handler_cnt = 0;
 volatile uint32_t g_rx_irq_cnt         = 0;
 volatile uint32_t g_rx_sem_cnt         = 0;
@@ -236,14 +235,18 @@ void ETH_DebugPrintCounters(const char *tag)
 
 void invalidate_dcache_range(void *addr, uint32_t size)
 {
-  (void)addr;
-  (void)size;
+    uint32_t start = (uint32_t)addr & ~(DCACHE_LINE_SIZE - 1U);
+    uint32_t end   = ((uint32_t)addr + size + DCACHE_LINE_SIZE - 1U)
+                     & ~(DCACHE_LINE_SIZE - 1U);
+    SCB_InvalidateDCache_by_Addr((uint32_t *)start, (int32_t)(end - start));
 }
 
 static void clean_dcache_range(void *addr, uint32_t size)
 {
-  (void)addr;
-  (void)size;
+    uint32_t start = (uint32_t)addr & ~(DCACHE_LINE_SIZE - 1U);
+    uint32_t end   = ((uint32_t)addr + size + DCACHE_LINE_SIZE - 1U)
+                     & ~(DCACHE_LINE_SIZE - 1U);
+    SCB_CleanDCache_by_Addr((uint32_t *)start, (int32_t)(end - start));
 }
 
 static void netif_link_up_in_tcpip(void *arg)
@@ -671,9 +674,9 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
-  (void)handlerEth;
-  g_tx_cplt_cnt++;
-  osSemaphoreRelease(TxPktSemaphore);
+    (void)handlerEth;
+    g_tx_cplt_cnt++;
+    osSemaphoreRelease(TxPktSemaphore);
 }
 
 /**
@@ -681,15 +684,18 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   * @param  handlerEth: ETH handler
   * @retval None
   */
+volatile uint32_t g_eth_dma_error_count = 0;
+volatile uint32_t g_eth_dma_last_error = 0;
+volatile uint32_t g_eth_hal_last_error = 0;
+
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
   uint32_t dma_err = HAL_ETH_GetDMAError(handlerEth);
-  (void)handlerEth;
 
   g_tx_err_cnt++;
-  DebugUART_Print("[ETH] DMA error: hal_err=0x%08lX dma_err=0x%08lX\r\n",
-                  (unsigned long)HAL_ETH_GetError(&heth),
-                  (unsigned long)dma_err);
+  g_eth_dma_error_count++;
+  g_eth_dma_last_error = dma_err;
+  g_eth_hal_last_error = HAL_ETH_GetError(handlerEth);
 
   osSemaphoreRelease(TxPktSemaphore);
 
@@ -731,19 +737,11 @@ static void low_level_init(struct netif *netif)
   heth.Init.RxDesc = DMARxDscrTab;
   heth.Init.RxBuffLen = 1536;
 
-  //LWIP_PLATFORM_DIAG(("[ETH] ethernetif.c BUILD TAG: AAA_1\r\n"));
-  //LWIP_PLATFORM_DIAG(("[ETH] Initializing Ethernet hardware...\r\n"));
   LWIP_PLATFORM_DIAG(("[ETH] MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
                       g_MACAddr[0], g_MACAddr[1], g_MACAddr[2],
                       g_MACAddr[3], g_MACAddr[4], g_MACAddr[5]));
 
   hal_eth_init_status = HAL_ETH_Init(&heth);
-
-  /* D-Cache сейчас выключен, поэтому cache-maintenance временно не делаем */
-    /*
-    SCB_CleanDCache_by_Addr((uint32_t*)DMARxDscrTab, sizeof(DMARxDscrTab));
-    SCB_CleanDCache_by_Addr((uint32_t*)DMATxDscrTab, sizeof(DMATxDscrTab));
-  */
 
   memset(&TxConfig, 0, sizeof(TxConfig));
   TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -757,7 +755,6 @@ static void low_level_init(struct netif *netif)
 
   netif->hwaddr_len = ETH_HWADDR_LEN;
   memcpy(netif->hwaddr, g_MACAddr, 6);
-
   netif->mtu = ETH_MAX_PAYLOAD;
 
 #if LWIP_ARP
@@ -770,7 +767,7 @@ static void low_level_init(struct netif *netif)
   RxPktSemaphore = osSemaphoreNew(1, 0, NULL);
   TxPktSemaphore = osSemaphoreNew(1, 0, NULL);
 
-  /* create event flags once (global in eth_events.c) */
+  /* create event flags once */
   if (g_ethLinkEvt == NULL)
   {
     g_ethLinkEvt = osEventFlagsNew(NULL);
@@ -781,7 +778,6 @@ static void low_level_init(struct netif *netif)
     LWIP_PLATFORM_DIAG(("[EVT] g_ethLinkEvt already  = %p\r\n", (void*)g_ethLinkEvt));
   }
 
-  /* sanity: print mask */
   LWIP_PLATFORM_DIAG(("[EVT] mask APP_ETH_EVT_LINK_UP=0x%08lX\r\n",
                       (unsigned long)APP_ETH_EVT_LINK_UP));
 
@@ -789,7 +785,7 @@ static void low_level_init(struct netif *netif)
   memset(&attributes, 0, sizeof(attributes));
   attributes.name = "EthIf";
   attributes.stack_size = 4096;
-  attributes.priority = osPriorityBelowNormal;
+  attributes.priority = osPriorityAboveNormal;
   osThreadNew(ethernetif_input, netif, &attributes);
 
   /* PHY init */
@@ -797,7 +793,6 @@ static void low_level_init(struct netif *netif)
 
   if (LAN8742_Init(&LAN8742) != LAN8742_STATUS_OK)
   {
-    /* Не валим netif административно, просто link_down */
     netif_set_link_down(netif);
     LWIP_PLATFORM_DIAG(("[ETH] LAN8742_Init failed -> link down only\r\n"));
     return;
@@ -810,9 +805,6 @@ static void low_level_init(struct netif *netif)
 
   Debug_PrintPhyRegs();
 
-  /* initial link state: only detect and pre-configure MAC,
-     but DO NOT start ETH and DO NOT raise netif here.
-     The only owner of link up/down must be ethernet_link_thread(). */
   PHYLinkState = LAN8742_GetLinkState(&LAN8742);
   DebugUART_Print("[ETH] PHYLinkState(initial)=%ld\r\n", (long)PHYLinkState);
   Debug_PrintPhyRegs();
@@ -862,7 +854,6 @@ static void low_level_init(struct netif *netif)
   }
 
   DebugUART_Print("[ETH] low_level_init done, waiting for ethernet_link_thread to control link state\r\n");
-
 #endif /* LWIP_ARP || LWIP_ETHERNET */
 }
 
@@ -928,7 +919,6 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     return ERR_IF;
   }
 
-  /* Минимальный Ethernet frame без FCS = 60 байт */
   tx_len = (frame_len < 60U) ? 60U : frame_len;
 
   memset(&g_TxBuffer, 0, sizeof(g_TxBuffer));
@@ -1384,32 +1374,31 @@ void ethernet_link_thread(void* argument)
 /* USER CODE END ETH link Thread core code for User BSP */
 void HAL_ETH_RxAllocateCallback(uint8_t **buff)
 {
-  struct pbuf_custom *pcustom = LWIP_MEMPOOL_ALLOC(RX_POOL);
+    struct pbuf_custom *pcustom = LWIP_MEMPOOL_ALLOC(RX_POOL);
 
-  if (pcustom != NULL)
-  {
-    uint8_t *base = (uint8_t *)pcustom + offsetof(RxBuff_t, buff);
+    if (pcustom != NULL)
+    {
+        uint8_t *base = (uint8_t *)pcustom + offsetof(RxBuff_t, buff);
 
-    g_rx_alloc_ok_cnt++;
+        g_rx_alloc_ok_cnt++;
 
-    /* DMA пишет ПОСЛЕ 2-байтного pad */
-    *buff = base + ETH_PAD_SIZE;
+        *buff = base + ETH_PAD_SIZE;
 
-    pcustom->custom_free_function = pbuf_free_custom;
+        pcustom->custom_free_function = pbuf_free_custom;
 
-    pbuf_alloced_custom(PBUF_RAW,
-                        0,
-                        PBUF_REF,
-                        pcustom,
-                        base,
-                        ETH_RX_BUFFER_SIZE + ETH_PAD_SIZE);
-  }
-  else
-  {
-    g_rx_alloc_fail_cnt++;
-    RxAllocStatus = RX_ALLOC_ERROR;
-    *buff = NULL;
-  }
+        pbuf_alloced_custom(PBUF_RAW,
+                            0,
+                            PBUF_REF,
+                            pcustom,
+                            base,
+                            ETH_RX_BUFFER_SIZE + ETH_PAD_SIZE);
+    }
+    else
+    {
+        g_rx_alloc_fail_cnt++;
+        RxAllocStatus = RX_ALLOC_ERROR;
+        *buff = NULL;
+    }
 }
 
 void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t Length)
@@ -1465,4 +1454,3 @@ void HAL_ETH_TxFreeCallback(uint32_t *buff)
 /* USER CODE BEGIN 8 */
 
 /* USER CODE END 8 */
-

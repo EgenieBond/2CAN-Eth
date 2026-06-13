@@ -25,8 +25,9 @@ typedef enum
 typedef struct
 {
     slcan_cmd_type_t type;
-    uint8_t bitrate_code;   /* S0..S8 */
-    can_frame_t frame;      /* для t/T/r/R */
+    uint8_t bitrate_code;     /* если пришёл классический S0..S8 */
+    uint32_t bitrate_bps;     /* итоговый битрейт в бит/с */
+    can_frame_t frame;
 } slcan_cmd_t;
 
 #endif /* SLCAN_TYPES_H */

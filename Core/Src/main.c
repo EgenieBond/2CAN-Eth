@@ -16,11 +16,10 @@
 #include "ethernet_task.h"
 #include "debug_uart.h"
 #include "task.h"
-
 #include "eth_app.h"
 #include "core_task.h"
 #include "can_task.h"
-#include "raw_tcp_client.h"
+#include <string.h>
 
 extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
@@ -42,6 +41,8 @@ extern void ETH_DebugPrintCounters(const char *tag);
 
 /* Private variables ---------------------------------------------------------*/
 
+FDCAN_HandleTypeDef hfdcan1;
+
 UART_HandleTypeDef huart3;
 
 /* Definitions for defaultTask */
@@ -60,6 +61,7 @@ void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_FDCAN1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -69,6 +71,23 @@ void StartDefaultTask(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 #define DISABLE_UNALIGN_TRP 1
+
+/*
+ * 0 = обычный режим проекта: Ethernet + Core + CanTask + TCP/SLCAN.
+ * 1 = автономный CAN-only тест:
+ *     без Ethernet, без Core, без парсера.
+ *     STM32 сама периодически отправляет CAN-кадры напрямую через FDCAN.
+ */
+#define CAN_ONLY_DIRECT_TEST 0
+
+/*
+ * 0 = тест на реальной CAN-шине, FDCAN_MODE_NORMAL.
+ * 1 = внутренний loopback без физической шины.
+ */
+#define CAN_ONLY_DIRECT_TEST_LOOPBACK 0
+#define CAN_ONLY_DIRECT_TEST_BITRATE 500000U
+
+static void CanOnlyDirectTest_Run(void);
 /* USER CODE END 0 */
 
 /**
@@ -111,15 +130,12 @@ int main(void)
   MX_USART3_UART_Init();
 
   /* USER CODE BEGIN 2 */
-
-  /* печатаем причину ресета сразу */
   uint32_t rsr = RCC->RSR;
-  //DebugUART_Print("[RESET] RCC->RSR=0x%08lX\r\n", rsr);
+  (void)rsr;
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
   uint8_t msg[] = "\r\n=== SYSTEM START ===\r\n";
   HAL_UART_Transmit(&huart3, msg, sizeof(msg) - 1, 100);
-
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -163,33 +179,27 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-  */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+  __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_HSE);
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
+                              | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
@@ -199,6 +209,144 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief FDCAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN1_Init(void)
+{
+  FDCAN_FilterTypeDef sFilterConfig = {0};
+
+  /*
+   * Конфигурация FDCAN взята из прошивки Славы.
+   * Отличие: запуск HAL_FDCAN_Start() выполняется не здесь,
+   * а в CanTask_Open(), потому что канал открывается по SLCAN-команде O/L/Y.
+   */
+
+  hfdcan1.Instance = FDCAN1;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;  //обычные кадры до 8 байт данных
+  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL; //режим, можно менять командами O, L, Y
+  hfdcan1.Init.AutoRetransmission = DISABLE; //повторная передача
+  /*
+     * если CAN-кадр не был подтверждён на шине,
+     * FDCAN не будет бесконечно пытаться отправлять его повторно.
+     */
+  hfdcan1.Init.TransmitPause = DISABLE;
+  hfdcan1.Init.ProtocolException = ENABLE;
+
+  /*
+   * начальная конфигурация FDCAN
+   * настройка для 1 Мбит/с (значение по умолчанию)
+   * при fdcan_ker_ck = 50 МГц.
+   */
+  hfdcan1.Init.NominalPrescaler = 1;
+  hfdcan1.Init.NominalSyncJumpWidth = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 48;
+  hfdcan1.Init.NominalTimeSeg2 = 1;
+
+  hfdcan1.Init.DataPrescaler = 13;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 2;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+
+  /*
+   * Настройки Message RAM, FIFO и TX очереди.
+   */
+  hfdcan1.Init.MessageRAMOffset = 0; //начать размещать структуры FDCAN в Message RAM с начала области
+
+  hfdcan1.Init.StdFiltersNbr = 1; //выделяем 1 фильтр для standard ID
+  hfdcan1.Init.ExtFiltersNbr = 1; //выделяем 1 фильтр для extended ID
+
+  // первая очередь
+  hfdcan1.Init.RxFifo0ElmtsNbr = 8;  //размер очереди = 8 кадров (у Славы было 1)
+  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+
+  // вторая очередь (не используется)
+  hfdcan1.Init.RxFifo1ElmtsNbr = 2;
+  hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+
+  //отдельный фиксированный буфер (не используется)
+  hfdcan1.Init.RxBuffersNbr = 0;  // 0 = выделенных RX buffers нет
+  hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+
+  hfdcan1.Init.TxEventsNbr = 1; // очередь событий передачи
+  hfdcan1.Init.TxBuffersNbr = 0; // буфер (не используется)
+
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 8; //размер очереди = 8 кадров (у Славы было 1)
+  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /*
+   * Фильтр для итогового CAN-Ethernet преобразователя:
+   * принимаем все стандартные CAN ID в RX FIFO0.
+   */
+  sFilterConfig.IdType = FDCAN_STANDARD_ID;
+  sFilterConfig.FilterIndex = 0;
+  sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+  sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  sFilterConfig.FilterID1 = 0x000;
+  sFilterConfig.FilterID2 = 0x000;
+
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /*
+   * Extended CAN ID тоже принимаем все в RX FIFO0.
+   */
+  sFilterConfig.IdType = FDCAN_EXTENDED_ID;
+  sFilterConfig.FilterIndex = 0;
+  sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+  sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  sFilterConfig.FilterID1 = 0x00000000;
+  sFilterConfig.FilterID2 = 0x00000000;
+
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /*
+   * Глобальный фильтр:
+   * unmatched standard и extended кадры тоже принимаем в RX FIFO0,
+   * remote frames отклоняем.
+   */
+  if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+                                   FDCAN_ACCEPT_IN_RX_FIFO0,
+                                   FDCAN_ACCEPT_IN_RX_FIFO0,
+                                   FDCAN_REJECT_REMOTE,
+                                   FDCAN_REJECT_REMOTE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /*
+   * В прошивке Славы приём был через polling.
+   * В моем проекте приём идёт через callback, поэтому здесь
+   * дополнительно назначаем прерывание RX FIFO0 на interrupt line 0.
+   */
+  if (HAL_FDCAN_ConfigInterruptLines(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                     FDCAN_INTERRUPT_LINE0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                     0) != HAL_OK)
   {
     Error_Handler();
   }
@@ -261,39 +409,253 @@ static void MX_USART3_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-  /* Здесь НЕ настраиваем USART3!
-     Его GPIO конфигурируются в HAL_UART_MspInit()
-     (PD8 = TX, PD9 = RX)
-  */
-  /* USER CODE END MX_GPIO_Init_1 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* Включаем тактирование портов */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* Если нужны другие пользовательские GPIO — настраивай здесь */
-
-  /* Пример: LED PB0 (если используешь) */
   /*
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
+   * PB0 — как в рабочем CAN-проекте.
+   * Скорее всего, это EN/STB/Silent управление CAN-трансивером.
+   */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
 
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-  */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
-
 /* USER CODE BEGIN 4 */
+static void CanOnlyDirectTest_Run(void)
+{
+  FDCAN_FilterTypeDef filter = {0};  //фильтр, какие принимаем кадры
+  FDCAN_TxHeaderTypeDef txHeader = {0}; //Заголовок передаваемого CAN-кадра.
+  uint8_t txData[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}; //Массив данных CAN-кадра.
+  uint32_t counter = 0; //Счётчик отправленных кадров
+
+  DebugUART_Print("[CAN_ONLY] direct CAN test started\r\n");
+
+  // На всякий случай останавливаем FDCAN, если он был запущен.
+  (void)HAL_FDCAN_Stop(&hfdcan1);
+
+  /*
+   * Выбор режима:
+   * - NORMAL для реальной CAN-шины;
+   * - INTERNAL_LOOPBACK для проверки без физики.
+   */
+#if CAN_ONLY_DIRECT_TEST_LOOPBACK
+  hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
+  DebugUART_Print("[CAN_ONLY] mode = INTERNAL LOOPBACK\r\n");
+#else
+  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+  DebugUART_Print("[CAN_ONLY] mode = NORMAL physical CAN\r\n");
+#endif
+
+  /*
+   * Настройка скорости.
+   * Если fdcan_ker_ck = 50 МГц:
+   * 50 000 000 / (1 × (1 + 86 + 13)) = 500 000 бит/с
+   */
+#if (CAN_ONLY_DIRECT_TEST_BITRATE == 500000U)
+  hfdcan1.Init.NominalPrescaler = 1;
+  hfdcan1.Init.NominalSyncJumpWidth = 13;
+  hfdcan1.Init.NominalTimeSeg1 = 86;
+  hfdcan1.Init.NominalTimeSeg2 = 13;
+
+  //Data phase для CAN FD.
+  hfdcan1.Init.DataPrescaler = 25;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 2;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+
+  DebugUART_Print("[CAN_ONLY] bitrate = 500 kbit/s\r\n");
+
+#elif (CAN_ONLY_DIRECT_TEST_BITRATE == 1000000U)
+  /*
+     * Настройка nominal phase для 1 Мбит/с.
+     *
+     * Если fdcan_ker_ck = 50 МГц:
+     * 50 000 000 / (1 × (1 + 48 + 1)) = 1 000 000 бит/с
+     */
+  hfdcan1.Init.NominalPrescaler = 1;
+  hfdcan1.Init.NominalSyncJumpWidth = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 48;
+  hfdcan1.Init.NominalTimeSeg2 = 1;
+
+  hfdcan1.Init.DataPrescaler = 13;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 2;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+
+  DebugUART_Print("[CAN_ONLY] bitrate = 1 Mbit/s\r\n");
+
+#else
+  DebugUART_Print("[CAN_ONLY] ERROR: unsupported CAN_ONLY_DIRECT_TEST_BITRATE\r\n");
+  for (;;)
+  {
+    osDelay(1000);
+  }
+#endif
+
+  /*
+   * Повторная инициализация FDCAN с выбранным режимом и скоростью.
+   */
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: HAL_FDCAN_Init failed\r\n");
+    Error_Handler();
+  }
+
+  /*
+   * Принимаем все стандартные ID.
+   */
+  filter.IdType = FDCAN_STANDARD_ID;
+  filter.FilterIndex = 0;
+  filter.FilterType = FDCAN_FILTER_MASK;
+  filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  filter.FilterID1 = 0x000;
+  filter.FilterID2 = 0x000;
+
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: standard filter config failed\r\n");
+    Error_Handler();
+  }
+
+  /*
+   * Принимаем все extended ID.
+   */
+  filter.IdType = FDCAN_EXTENDED_ID;
+  filter.FilterIndex = 0;
+  filter.FilterType = FDCAN_FILTER_MASK;
+  filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  filter.FilterID1 = 0x00000000;
+  filter.FilterID2 = 0x00000000;
+
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: extended filter config failed\r\n");
+    Error_Handler();
+  }
+
+  /*
+   * Unmatched кадры принимаем в FIFO0,
+   * remote frames отклоняем.
+   */
+  if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+                                   FDCAN_ACCEPT_IN_RX_FIFO0,
+                                   FDCAN_ACCEPT_IN_RX_FIFO0,
+                                   FDCAN_REJECT_REMOTE,
+                                   FDCAN_REJECT_REMOTE) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: global filter config failed\r\n");
+    Error_Handler();
+  }
+
+  /*
+     * Настраиваем, что событие "новое сообщение в RX FIFO0"
+     * будет идти на interrupt line 0.
+     */
+  if (HAL_FDCAN_ConfigInterruptLines(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                     FDCAN_INTERRUPT_LINE0) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: interrupt line config failed\r\n");
+    Error_Handler();
+  }
+
+  /*
+     * Активируем уведомление о новом сообщении в RX FIFO0.
+     * После этого при приёме кадра может вызываться HAL_FDCAN_RxFifo0Callback().
+     */
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                     0) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: notification activate failed\r\n");
+    Error_Handler();
+  }
+
+  /*
+     * Запуска FDCAN
+     */
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+  {
+    DebugUART_Print("[CAN_ONLY] ERROR: HAL_FDCAN_Start failed\r\n");
+    Error_Handler();
+  }
+
+  DebugUART_Print("[CAN_ONLY] FDCAN started\r\n");
+  DebugUART_Print("[CAN_ONLY] FDCAN kernel clock=%lu\r\n",
+                  (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_FDCAN));
+  DebugUART_Print("[CAN_ONLY] NBTP=0x%08lX PSR=0x%08lX CCCR=0x%08lX\r\n",
+                  (unsigned long)hfdcan1.Instance->NBTP,
+                  (unsigned long)hfdcan1.Instance->PSR,
+                  (unsigned long)hfdcan1.Instance->CCCR);
+
+  /*
+   * Заголовок CAN-кадра.
+   * Отправляем standard ID = 0x123, DLC = 8.
+   */
+  txHeader.Identifier = 0x123;
+  txHeader.IdType = FDCAN_STANDARD_ID; //ID стандартный 11 бит
+  txHeader.TxFrameType = FDCAN_DATA_FRAME;
+  txHeader.DataLength = FDCAN_DLC_BYTES_8;	//Длина данных 8 байт
+  txHeader.ErrorStateIndicator = FDCAN_ESI_PASSIVE;
+  txHeader.BitRateSwitch = FDCAN_BRS_OFF;
+  txHeader.FDFormat = FDCAN_CLASSIC_CAN;
+  txHeader.TxEventFifoControl = FDCAN_STORE_TX_EVENTS; //Сохранять событие передачи в TX Event FIFO
+  txHeader.MessageMarker = 0xDD; //Маркер сообщения
+
+  /*
+   * Бесконечный цикл прямой отправки CAN-кадров.
+   */
+  for (;;)
+  {
+    /*
+     * Для наглядности меняем первый байт данных.
+     */
+    txData[0] = (uint8_t)(counter & 0xFFU);
+
+    if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U)
+    {
+      if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, txData) == HAL_OK)
+      {
+        DebugUART_Print("[CAN_ONLY] TX #%lu ID=0x123 DATA=%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                        (unsigned long)counter,
+                        txData[0], txData[1], txData[2], txData[3],
+                        txData[4], txData[5], txData[6], txData[7]);
+      }
+      else
+      {
+        DebugUART_Print("[CAN_ONLY] ERROR: AddMessage failed, err=0x%08lX PSR=0x%08lX ECR=0x%08lX\r\n",
+                        (unsigned long)HAL_FDCAN_GetError(&hfdcan1),
+                        (unsigned long)hfdcan1.Instance->PSR,
+                        (unsigned long)hfdcan1.Instance->ECR);
+      }
+    }
+    else
+    {
+      DebugUART_Print("[CAN_ONLY] TX FIFO FULL TXFQS=0x%08lX PSR=0x%08lX ECR=0x%08lX\r\n",
+                      (unsigned long)hfdcan1.Instance->TXFQS,
+                      (unsigned long)hfdcan1.Instance->PSR,
+                      (unsigned long)hfdcan1.Instance->ECR);
+    }
+
+    counter++;
+
+    /*
+     * Период отправки = 1 кадр в секунду
+     */
+    osDelay(1000);
+  }
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -313,42 +675,40 @@ void StartDefaultTask(void *argument)
   __DSB();
   __ISB();
 
+
+  DebugUART_Print("[CPU] CCR = 0x%08lX\r\n", SCB->CCR);
   /* init lwIP */
   MX_LWIP_Init();
-  DebugUART_Print("[LWIP] MX_LWIP_Init done\r\n");
 
+  /* init FDCAN before CAN task start */
+  MX_FDCAN1_Init();
+  DebugUART_Print("[BOOT] after FDCAN1 init\r\n");
+
+#if CAN_ONLY_DIRECT_TEST
   /*
-   * ВРЕМЕННО:
-   * отключаем внутренний pipeline SLCAN/Core/CAN.
-   * Сейчас режим сырого TCP:
-   *  - либо ECHO
-   *  - либо PROXY STM32 <-> NetCAN2
+   * Автономный CAN-only режим:
+   * Ethernet/Core/CanTask не запускаются.
+   * Проверяется только FDCAN и физическая CAN-шина.
    */
-  // EthApp_Init();
-  // CoreTask_Start();
-  // CanTask_Start();
+  CanOnlyDirectTest_Run();
+#else
+  /* pipeline */
+  EthApp_Init();
+  CoreTask_Start();
+  CanTask_Start();
 
-  /* старт Ethernet-задачи, которая поднимет линк и сервер */
+  /* Ethernet app task */
   EthernetTask_Start();
-
-  /*
-   * старт TCP-клиента STM32 -> NetCAN2
-   * он сам будет пытаться подключаться, когда сеть поднимется
-   */
-  RawTcpClientTask_Start();
 
   for (;;)
   {
     osDelay(1000);
   }
+#endif
 }
 
  /* MPU Configuration */
-/* MPU Configuration for STM32H723 + Ethernet (RMII) + LwIP zero-copy
-   Goal:
-   - D1 SRAM (0x2400_0000) cacheable (normal)
-   - D2 SRAM (0x3000_0000) NON-cacheable (for ETH DMA descriptors + RX pool + memp pools if placed there)
-*/
+
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
@@ -402,7 +762,7 @@ void MPU_Config(void)
 
   /* Включаем кеши (после MPU!) */
   SCB_EnableICache();
-  /* SCB_EnableDCache(); */   /* временно выключено для отладки Ethernet */
+  SCB_EnableDCache();    /* временно выключено для отладки Ethernet */
   __DSB();
   __ISB();
 }
@@ -413,13 +773,10 @@ void MPU_Config(void)
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef  USE_FULL_ASSERT
