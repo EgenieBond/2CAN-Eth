@@ -53,21 +53,35 @@ static uint8_t  g_bench_started    = 0;
 static uint8_t  g_bench_done       = 0;
 static uint32_t g_bench_start_tick_abs = 0;
 
+#include "lwip/stats.h"
+
 static void Bench_PrintProgress(void)
 {
     uint32_t elapsed_ms = osKernelGetTickCount() - g_bench_start_tick;
     uint32_t speed_kbps = 0;
+    u16_t rcv_wnd = 0;
+    u32_t rcv_nxt = 0;
 
     if (elapsed_ms > 0)
     {
         speed_kbps = (uint32_t)((uint64_t)g_bench_bytes * 8ULL / elapsed_ms);
     }
 
-    DebugUART_Print("[BENCH] %lu MB | elapsed %lu ms | %lu Kbit/s (%lu Mbit/s)\r\n",
+    if (client_pcb != NULL)
+    {
+        rcv_wnd = client_pcb->rcv_wnd;
+        rcv_nxt = client_pcb->rcv_nxt;
+    }
+
+    DebugUART_Print("[BENCH] %lu MB | %lu ms | %lu Kbit/s (%lu Mbit/s) | rcv_wnd=%u rcv_nxt=%lu tcp_seg err=%u pbuf_pool err=%u\r\n",
                     (unsigned long)(g_bench_bytes / (1024UL * 1024UL)),
                     (unsigned long)elapsed_ms,
                     (unsigned long)speed_kbps,
-                    (unsigned long)(speed_kbps / 1000UL));
+                    (unsigned long)(speed_kbps / 1000UL),
+                    (unsigned)rcv_wnd,
+                    (unsigned long)rcv_nxt,
+                    (unsigned)lwip_stats.memp[MEMP_TCP_SEG]->err,
+                    (unsigned)lwip_stats.memp[MEMP_PBUF_POOL]->err);
 }
 
 static void Bench_Reset(void)
@@ -390,6 +404,7 @@ static err_t tcp_server_recv(void *arg,
     }
 
     tcp_recved(tpcb, p->tot_len);
+    tcp_output(tpcb);   /* немедленно отправляем ACK, не ждём таймер */
 
     for (struct pbuf *q = p; q != NULL; q = q->next)
     {

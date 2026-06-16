@@ -70,7 +70,7 @@ extern "C" {
 #define DEFAULT_TCP_RECVMBOX_SIZE         16
 #define DEFAULT_ACCEPTMBOX_SIZE           8
 #define RECV_BUFSIZE_DEFAULT              2000000000
-#define LWIP_STATS                        0
+#define LWIP_STATS                        1
 
 /* ===== Checksums =====
  * software generation оставляем включённой,
@@ -147,7 +147,7 @@ extern "C" {
 #define PBUF_POOL_BUFSIZE                 1536
 
 /* основные буферы */
-#define MEMP_NUM_TCP_SEG                  32
+#define MEMP_NUM_TCP_SEG                  32	/* должно быть >= TCP_SND_QUEUELEN = 4*8 = 32, ставим с запасом */
 #define TCP_SND_BUF                       (8 * TCP_MSS)
 #define TCP_WND                           (12 * TCP_MSS)
 #define PBUF_POOL_SIZE                    24

@@ -188,6 +188,7 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM_D1
   
+  
     /* ===== lwIP heap region (must NOT overlap .bss / FreeRTOS heap) ===== */
 .lwip_heap (NOLOAD) :
 {

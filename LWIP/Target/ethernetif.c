@@ -188,8 +188,22 @@ static uint8_t g_TxFrame[1536] __attribute__((aligned(32)));
 static ETH_BufferTypeDef g_TxBuffer __attribute__((aligned(32)));
  */
 
-static uint8_t g_TxFrame[1536] __attribute__((section(".TxDecripSection"), aligned(32)));
-static ETH_BufferTypeDef g_TxBuffer __attribute__((section(".TxDecripSection"), aligned(32)));
+#define ETH_TX_POOL_SIZE  4U
+
+typedef struct
+{
+    uint8_t           frame[1536];
+    ETH_BufferTypeDef desc;
+    volatile uint8_t  busy;
+} EthTxSlot_t;
+
+static EthTxSlot_t g_TxPool[ETH_TX_POOL_SIZE]
+    __attribute__((section(".TxDecripSection"), aligned(32)));
+
+static volatile uint32_t g_TxPoolHead = 0;
+static osThreadId_t       g_TxTaskHandle  = NULL;
+static osMessageQueueId_t g_TxQueue       = NULL;
+static void EthTxTask(void *argument);  /* forward declaration */
 
 /* ===== Глобальные счетчики ===== */
 volatile uint32_t g_eth_irq_handler_cnt = 0;
@@ -719,6 +733,7 @@ void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
  * @param netif the already initialized lwip network interface structure
  *        for this ethernetif
  */
+
 static void low_level_init(struct netif *netif)
 {
   HAL_StatusTypeDef hal_eth_init_status = HAL_OK;
@@ -729,7 +744,6 @@ static void low_level_init(struct netif *netif)
   int32_t PHYLinkState = 0;
   ETH_MACConfigTypeDef MACConf = {0};
 
-  /* --- ETH HAL init --- */
   heth.Instance = ETH;
   heth.Init.MACAddr = g_MACAddr;
   heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
@@ -751,6 +765,15 @@ static void low_level_init(struct netif *netif)
   /* RX pool init */
   LWIP_MEMPOOL_INIT(RX_POOL);
 
+  /* Инициализируем TX пул */
+  for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
+  {
+      g_TxPool[i].busy = 0;
+  }
+  g_TxPoolHead = 0;
+  DebugUART_Print("[ETH] TX pool initialized, slots=%u\r\n",
+                  (unsigned)ETH_TX_POOL_SIZE);
+
 #if LWIP_ARP || LWIP_ETHERNET
 
   netif->hwaddr_len = ETH_HWADDR_LEN;
@@ -763,11 +786,9 @@ static void low_level_init(struct netif *netif)
   netif->flags |= NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHERNET;
 #endif
 
-  /* semaphores */
   RxPktSemaphore = osSemaphoreNew(1, 0, NULL);
   TxPktSemaphore = osSemaphoreNew(1, 0, NULL);
 
-  /* create event flags once */
   if (g_ethLinkEvt == NULL)
   {
     g_ethLinkEvt = osEventFlagsNew(NULL);
@@ -781,14 +802,12 @@ static void low_level_init(struct netif *netif)
   LWIP_PLATFORM_DIAG(("[EVT] mask APP_ETH_EVT_LINK_UP=0x%08lX\r\n",
                       (unsigned long)APP_ETH_EVT_LINK_UP));
 
-  /* input thread */
   memset(&attributes, 0, sizeof(attributes));
   attributes.name = "EthIf";
   attributes.stack_size = 4096;
   attributes.priority = osPriorityAboveNormal;
   osThreadNew(ethernetif_input, netif, &attributes);
 
-  /* PHY init */
   LAN8742_RegisterBusIO(&LAN8742, &LAN8742_IOCtx);
 
   if (LAN8742_Init(&LAN8742) != LAN8742_STATUS_OK)
@@ -817,22 +836,18 @@ static void low_level_init(struct netif *netif)
         duplex = ETH_FULLDUPLEX_MODE;
         speed  = ETH_SPEED_100M;
         break;
-
       case LAN8742_STATUS_100MBITS_HALFDUPLEX:
         duplex = ETH_HALFDUPLEX_MODE;
         speed  = ETH_SPEED_100M;
         break;
-
       case LAN8742_STATUS_10MBITS_FULLDUPLEX:
         duplex = ETH_FULLDUPLEX_MODE;
         speed  = ETH_SPEED_10M;
         break;
-
       case LAN8742_STATUS_10MBITS_HALFDUPLEX:
         duplex = ETH_HALFDUPLEX_MODE;
         speed  = ETH_SPEED_10M;
         break;
-
       default:
         duplex = ETH_FULLDUPLEX_MODE;
         speed  = ETH_SPEED_100M;
@@ -854,7 +869,43 @@ static void low_level_init(struct netif *netif)
   }
 
   DebugUART_Print("[ETH] low_level_init done, waiting for ethernet_link_thread to control link state\r\n");
+
 #endif /* LWIP_ARP || LWIP_ETHERNET */
+}
+
+static void EthTxTask(void *argument)
+{
+    LWIP_UNUSED_ARG(argument);
+
+    EthTxSlot_t *slot = NULL;
+
+    for (;;)
+    {
+        /* Ждём слот из очереди */
+        if (osMessageQueueGet(g_TxQueue, &slot, NULL, osWaitForever) != osOK)
+        {
+            continue;
+        }
+
+        if (slot == NULL)
+        {
+            continue;
+        }
+
+        /* Ждём завершения DMA передачи */
+        if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
+        {
+            g_tx_timeout_cnt++;
+            DebugUART_Print("[ETH] TxTask: timeout\r\n");
+        }
+        else
+        {
+            HAL_ETH_ReleaseTxPacket(&heth);
+        }
+
+        /* Освобождаем слот */
+        slot->busy = 0;
+    }
 }
 
 /**
@@ -875,105 +926,152 @@ static void low_level_init(struct netif *netif)
 
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
-  uint16_t frame_len = 0;
-  uint16_t tx_len = 0;
-  HAL_StatusTypeDef st;
+    uint16_t frame_len = 0;
+    uint16_t tx_len    = 0;
+    HAL_StatusTypeDef st;
+    EthTxSlot_t *slot  = NULL;
+    uint32_t slot_idx  = 0;
 
-  LWIP_UNUSED_ARG(netif);
+    LWIP_UNUSED_ARG(netif);
 
-  if (p == NULL)
-  {
-    return ERR_ARG;
-  }
+    if (p == NULL) { return ERR_ARG; }
 
 #if ETH_PAD_SIZE
-  if (pbuf_header(p, -ETH_PAD_SIZE) != 0)
-  {
-    return ERR_BUF;
-  }
+    if (pbuf_header(p, -ETH_PAD_SIZE) != 0) { return ERR_BUF; }
 #endif
 
-  g_low_level_output_cnt++;
+    g_low_level_output_cnt++;
 
-  frame_len = p->tot_len;
+    frame_len = p->tot_len;
 
-  if ((frame_len == 0U) || (frame_len > sizeof(g_TxFrame)))
-  {
-    g_tx_submit_fail_cnt++;
+    if ((frame_len == 0U) || (frame_len > 1536U))
+    {
+        g_tx_submit_fail_cnt++;
+#if ETH_PAD_SIZE
+        pbuf_header(p, ETH_PAD_SIZE);
+#endif
+        return ERR_IF;
+    }
+
+    /* Ищем свободный слот */
+    slot = NULL;
+    for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
+    {
+        slot_idx = (g_TxPoolHead + i) % ETH_TX_POOL_SIZE;
+        if (!g_TxPool[slot_idx].busy)
+        {
+            slot = &g_TxPool[slot_idx];
+            break;
+        }
+    }
+
+    /* Если все слоты заняты — ждём завершения */
+    if (slot == NULL)
+    {
+        if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
+        {
+            g_tx_timeout_cnt++;
+            DebugUART_Print("[ETH] TX timeout: no free slot\r\n");
+#if ETH_PAD_SIZE
+            pbuf_header(p, ETH_PAD_SIZE);
+#endif
+            return ERR_IF;
+        }
+
+        HAL_ETH_ReleaseTxPacket(&heth);
+
+        for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
+        {
+            slot_idx = (g_TxPoolHead + i) % ETH_TX_POOL_SIZE;
+            if (!g_TxPool[slot_idx].busy)
+            {
+                slot = &g_TxPool[slot_idx];
+                break;
+            }
+        }
+
+        if (slot == NULL)
+        {
+            g_tx_submit_fail_cnt++;
+#if ETH_PAD_SIZE
+            pbuf_header(p, ETH_PAD_SIZE);
+#endif
+            return ERR_MEM;
+        }
+    }
+
+    /* Копируем данные */
+    memset(slot->frame, 0, sizeof(slot->frame));
+
+    if (pbuf_copy_partial(p, slot->frame, frame_len, 0) != frame_len)
+    {
+        g_tx_submit_fail_cnt++;
+#if ETH_PAD_SIZE
+        pbuf_header(p, ETH_PAD_SIZE);
+#endif
+        return ERR_IF;
+    }
+
+    tx_len = (frame_len < 60U) ? 60U : frame_len;
+
+    memset(&slot->desc, 0, sizeof(slot->desc));
+    slot->desc.buffer = slot->frame;
+    slot->desc.len    = tx_len;
+    slot->desc.next   = NULL;
+
+    TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
+    TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
+    TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
+    TxConfig.Length       = tx_len;
+    TxConfig.TxBuffer     = &slot->desc;
+    TxConfig.pData        = NULL;
+
+    __DMB();
+    __DSB();
+    __ISB();
+
+    slot->busy = 1;
+    g_TxPoolHead = (g_TxPoolHead + 1U) % ETH_TX_POOL_SIZE;
+
+    st = HAL_ETH_Transmit_IT(&heth, &TxConfig);
+
+    if (st != HAL_OK)
+    {
+        slot->busy = 0;
+        g_TxPoolHead = (g_TxPoolHead + ETH_TX_POOL_SIZE - 1U) % ETH_TX_POOL_SIZE;
+        g_tx_submit_fail_cnt++;
+        DebugUART_Print("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
+                        (int)st,
+                        (unsigned long)HAL_ETH_GetError(&heth),
+                        (unsigned long)HAL_ETH_GetDMAError(&heth));
+#if ETH_PAD_SIZE
+        pbuf_header(p, ETH_PAD_SIZE);
+#endif
+        return ERR_IF;
+    }
+
+    g_tx_submit_ok_cnt++;
+
+    /* Блокирующее ожидание завершения */
+    if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
+    {
+        g_tx_timeout_cnt++;
+        DebugUART_Print("[ETH] TX timeout waiting completion\r\n");
+        slot->busy = 0;
+#if ETH_PAD_SIZE
+        pbuf_header(p, ETH_PAD_SIZE);
+#endif
+        return ERR_IF;
+    }
+
+    HAL_ETH_ReleaseTxPacket(&heth);
+    slot->busy = 0;
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE);
 #endif
-    return ERR_IF;
-  }
 
-  memset(g_TxFrame, 0, sizeof(g_TxFrame));
-
-  if (pbuf_copy_partial(p, g_TxFrame, frame_len, 0) != frame_len)
-  {
-    g_tx_submit_fail_cnt++;
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, ETH_PAD_SIZE);
-#endif
-    return ERR_IF;
-  }
-
-  tx_len = (frame_len < 60U) ? 60U : frame_len;
-
-  memset(&g_TxBuffer, 0, sizeof(g_TxBuffer));
-  g_TxBuffer.buffer = g_TxFrame;
-  g_TxBuffer.len    = tx_len;
-  g_TxBuffer.next   = NULL;
-
-  TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
-  TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
-
-  TxConfig.Length   = tx_len;
-  TxConfig.TxBuffer = &g_TxBuffer;
-  TxConfig.pData    = NULL;
-
-  __DMB();
-  __DSB();
-  __ISB();
-
-  st = HAL_ETH_Transmit_IT(&heth, &TxConfig);
-  if (st != HAL_OK)
-  {
-    g_tx_submit_fail_cnt++;
-
-    DebugUART_Print("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
-                    (int)st,
-                    (unsigned long)HAL_ETH_GetError(&heth),
-                    (unsigned long)HAL_ETH_GetDMAError(&heth));
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, ETH_PAD_SIZE);
-#endif
-    return ERR_IF;
-  }
-
-  g_tx_submit_ok_cnt++;
-
-  if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
-  {
-    g_tx_timeout_cnt++;
-    DebugUART_Print("[ETH] TX timeout waiting completion\r\n");
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, ETH_PAD_SIZE);
-#endif
-    return ERR_IF;
-  }
-
-  HAL_ETH_ReleaseTxPacket(&heth);
-
-#if ETH_PAD_SIZE
-  pbuf_header(p, ETH_PAD_SIZE);
-#endif
-
-  return ERR_OK;
+    return ERR_OK;
 }
 
 /**
