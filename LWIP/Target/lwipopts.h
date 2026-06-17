@@ -70,7 +70,7 @@ extern "C" {
 #define DEFAULT_TCP_RECVMBOX_SIZE         16
 #define DEFAULT_ACCEPTMBOX_SIZE           8
 #define RECV_BUFSIZE_DEFAULT              2000000000
-#define LWIP_STATS                        1
+#define LWIP_STATS                        0
 
 /* ===== Checksums =====
  * software generation оставляем включённой,

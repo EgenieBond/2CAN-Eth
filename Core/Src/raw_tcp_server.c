@@ -53,7 +53,7 @@ static uint8_t  g_bench_started    = 0;
 static uint8_t  g_bench_done       = 0;
 static uint32_t g_bench_start_tick_abs = 0;
 
-#include "lwip/stats.h"
+//#include "lwip/stats.h"
 
 static void Bench_PrintProgress(void)
 {
@@ -73,15 +73,13 @@ static void Bench_PrintProgress(void)
         rcv_nxt = client_pcb->rcv_nxt;
     }
 
-    DebugUART_Print("[BENCH] %lu MB | %lu ms | %lu Kbit/s (%lu Mbit/s) | rcv_wnd=%u rcv_nxt=%lu tcp_seg err=%u pbuf_pool err=%u\r\n",
+    DebugUART_Print("[BENCH] %lu MB | %lu ms | %lu Kbit/s (%lu Mbit/s) | rcv_wnd=%u rcv_nxt=%lu\r\n",
                     (unsigned long)(g_bench_bytes / (1024UL * 1024UL)),
                     (unsigned long)elapsed_ms,
                     (unsigned long)speed_kbps,
                     (unsigned long)(speed_kbps / 1000UL),
                     (unsigned)rcv_wnd,
-                    (unsigned long)rcv_nxt,
-                    (unsigned)lwip_stats.memp[MEMP_TCP_SEG]->err,
-                    (unsigned)lwip_stats.memp[MEMP_PBUF_POOL]->err);
+                    (unsigned long)rcv_nxt);
 }
 
 static void Bench_Reset(void)
