@@ -179,6 +179,10 @@ else
 
   DebugUART_Print("[ETH] LINK UP (task sees it)\r\n");
 
+  DebugUART_Print("[CPU] SystemCoreClock = %lu Hz (%lu MHz)\r\n",
+                  (unsigned long)SystemCoreClock,
+                  (unsigned long)(SystemCoreClock / 1000000UL));
+
   /* 2) Теперь PHY дамп корректен */
   //PHY_Dump();
   //PHY_Scan();

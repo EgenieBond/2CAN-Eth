@@ -70,9 +70,7 @@ static int CanTask_BuildTxHeader(const can_frame_t *frame, FDCAN_TxHeaderTypeDef
         hdr->IdType = FDCAN_STANDARD_ID;
     }
 
-    hdr->TxFrameType = ((frame->Flags & CAN_FLAG_RTR) != 0U)
-                     ? FDCAN_REMOTE_FRAME
-                     : FDCAN_DATA_FRAME;
+    hdr->TxFrameType = FDCAN_DATA_FRAME;
 
     switch (frame->Size)
     {
@@ -89,11 +87,14 @@ static int CanTask_BuildTxHeader(const can_frame_t *frame, FDCAN_TxHeaderTypeDef
             return -1;
     }
 
-    hdr->ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    /*
+     * Поля TxHeader сделаны как в прошивке Славы.
+     */
+    hdr->ErrorStateIndicator = FDCAN_ESI_PASSIVE;
     hdr->BitRateSwitch = FDCAN_BRS_OFF;
     hdr->FDFormat = FDCAN_CLASSIC_CAN;
-    hdr->TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-    hdr->MessageMarker = 0;
+    hdr->TxEventFifoControl = FDCAN_STORE_TX_EVENTS;
+    hdr->MessageMarker = 0xDD;
 
     return 0;
 }
@@ -107,80 +108,45 @@ static int CanTask_GetBitTiming(uint32_t bitrate_bps, can_bittiming_t *bt)
 
     memset(bt, 0, sizeof(*bt));
 
+    /*
+     * Основные рабочие скорости:
+     *   S6 = 500 кбит/с
+     *   S8 = 1 Мбит/с
+     */
+
+    /*
+     * CAN bitrate = FDCAN kernel clock / (Prescaler × (1 + TimeSeg1 + TimeSeg2))
+     * 1 CAN bit = Sync segment + TimeSeg1 + TimeSeg2
+     */
+
     switch (bitrate_bps)
     {
-        case 10000U:
-            bt->prescaler = 125;
-            bt->sjw       = 1;
-            bt->tseg1     = 12;
-            bt->tseg2     = 7;
-            return 0;
-
-        case 20000U:
-            bt->prescaler = 125;
-            bt->sjw       = 1;
-            bt->tseg1     = 7;
-            bt->tseg2     = 2;
-            return 0;
-
-        case 50000U:
-            bt->prescaler = 25;
-            bt->sjw       = 1;
-            bt->tseg1     = 12;
-            bt->tseg2     = 7;
-            return 0;
-
-        case 100000U:
-            bt->prescaler = 25;
-            bt->sjw       = 1;
-            bt->tseg1     = 7;
-            bt->tseg2     = 2;
-            return 0;
-
-        case 125000U:
-            bt->prescaler = 10;
-            bt->sjw       = 1;
-            bt->tseg1     = 12;
-            bt->tseg2     = 7;
-            return 0;
-
-        case 250000U:
-            bt->prescaler = 5;
-            bt->sjw       = 1;
-            bt->tseg1     = 12;
-            bt->tseg2     = 7;
-            return 0;
-
         case 500000U:
-            /*
-             * FDCAN kernel clock = 25 MHz
-             * 25 MHz / (5 * (1 + 7 + 2)) = 500 kbit/s
-             */
-            bt->prescaler = 5;
-            bt->sjw       = 1;
-            bt->tseg1     = 7;
-            bt->tseg2     = 2;
+            /* для ~500 кбит/с.   */
+            bt->prescaler = 1;   // делитель тактовой частоты FDCAN
+            bt->sjw       = 13;  // насколько контроллер может подстраивать синхронизацию
+            bt->tseg1     = 86;  // первая часть бита
+            bt->tseg2     = 13;  // вторая часть бита
             return 0;
-
-        case 800000U:
-            bt->prescaler = 1;
-            bt->sjw       = 1;
-            bt->tseg1     = 22;
-            bt->tseg2     = 8;
-            return 0;
+            // 1 + 86 + 13 = 100 - Количество временных квантов
+            // 50 000 000 / (1 × 100) = 500 000 бит/с  - Если FDCAN kernel clock считается как 50 МГц
 
         case 1000000U:
-            /*
-             * FDCAN kernel clock = 25 MHz
-             * 25 MHz / (1 * (1 + 20 + 4)) = 1 Mbit/s
-             */
+        	/* для 1 Мбит/с.   */
             bt->prescaler = 1;
             bt->sjw       = 1;
-            bt->tseg1     = 20;
-            bt->tseg2     = 4;
+            bt->tseg1     = 48;
+            bt->tseg2     = 1;
             return 0;
+            // 1 + 48 + 1 = 50
+            // 50 000 000 / (1 × 50) = 1 000 000 бит/с
 
         default:
+            /*
+             * Остальные скорости специально не включаем,
+             * потому что эталонная прошивка предприятия была проверена
+             * именно на этих настройках.
+             */
             return -1;
     }
 }
@@ -213,7 +179,8 @@ static int CanTask_ApplyBitrate(uint32_t bitrate_bps)
 
 int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
 {
-    FDCAN_FilterTypeDef sFilter;
+    FDCAN_FilterTypeDef sFilterConfig;
+    can_bittiming_t bt;
 
     if (g_can_started)
     {
@@ -227,16 +194,45 @@ int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
         DebugUART_Print("[CAN] controller stopped before reopen\r\n");
     }
 
-    if (CanTask_ApplyBitrate(bitrate_bps) != 0)
+    if (CanTask_GetBitTiming(bitrate_bps, &bt) != 0)
     {
+        DebugUART_Print("[CAN] ERROR: unsupported bitrate %lu bit/s\r\n",
+                        (unsigned long)bitrate_bps);
         return -1;
+    }
+
+    /*
+     * Применяем тайминги.
+     */
+    hfdcan1.Init.NominalPrescaler     = bt.prescaler;
+    hfdcan1.Init.NominalSyncJumpWidth = bt.sjw;
+    hfdcan1.Init.NominalTimeSeg1      = bt.tseg1;
+    hfdcan1.Init.NominalTimeSeg2      = bt.tseg2;
+
+    /*
+     * Data phase — как в эталонной прошивке.
+     * Для 500 кбит/с в эталоне был другой DataPrescaler.
+     * Но так как используется Classic CAN, это не критично.
+     */
+    if (bitrate_bps == 500000U)
+    {
+        hfdcan1.Init.DataPrescaler = 25;
+        hfdcan1.Init.DataSyncJumpWidth = 1;
+        hfdcan1.Init.DataTimeSeg1 = 2;
+        hfdcan1.Init.DataTimeSeg2 = 1;
+    }
+    else
+    {
+        hfdcan1.Init.DataPrescaler = 13;
+        hfdcan1.Init.DataSyncJumpWidth = 1;
+        hfdcan1.Init.DataTimeSeg1 = 2;
+        hfdcan1.Init.DataTimeSeg2 = 1;
     }
 
     switch (mode)
     {
         case CORE_CAN_MODE_NORMAL:
             hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-            //hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
             break;
 
         case CORE_CAN_MODE_LISTEN_ONLY:
@@ -244,6 +240,10 @@ int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
             break;
 
         case CORE_CAN_MODE_SELF_RECEPTION:
+            /*
+             * Для домашней проверки оставляем loopback.
+             * На предприятии для реальной шины используется O/NORMAL.
+             */
             hfdcan1.Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;
             break;
 
@@ -258,18 +258,38 @@ int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
         return -1;
     }
 
-    memset(&sFilter, 0, sizeof(sFilter));
+    /*
+     * Фильтр для итогового CAN-Ethernet преобразователя:
+     * принимаем все стандартные CAN ID в RX FIFO0.
+     */
+    memset(&sFilterConfig, 0, sizeof(sFilterConfig));
 
-    sFilter.IdType       = FDCAN_STANDARD_ID;
-    sFilter.FilterIndex  = 0;
-    sFilter.FilterType   = FDCAN_FILTER_MASK;
-    sFilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-    sFilter.FilterID1    = 0x000;
-    sFilter.FilterID2    = 0x000;
+    sFilterConfig.IdType = FDCAN_STANDARD_ID;
+    sFilterConfig.FilterIndex = 0;
+    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    sFilterConfig.FilterID1 = 0x000;
+    sFilterConfig.FilterID2 = 0x000;
 
-    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilter) != HAL_OK)
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
     {
         DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ConfigFilter failed in CanTask_Open\r\n");
+        return -1;
+    }
+
+    /*
+     * Extended CAN ID тоже принимаем все в RX FIFO0.
+     */
+    sFilterConfig.IdType = FDCAN_EXTENDED_ID;
+    sFilterConfig.FilterIndex = 0;
+    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    sFilterConfig.FilterID1 = 0x00000000;
+    sFilterConfig.FilterID2 = 0x00000000;
+
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+    {
+        DebugUART_Print("[CAN] ERROR: HAL_FDCAN_ConfigFilter EXT failed in CanTask_Open\r\n");
         return -1;
     }
 
@@ -283,6 +303,11 @@ int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
         return -1;
     }
 
+    /*
+     * В эталонной прошивке приём был через polling,
+     * а в твоей архитектуре через callback.
+     * Поэтому добавляем interrupt line + notification.
+     */
     if (HAL_FDCAN_ConfigInterruptLines(&hfdcan1,
                                        FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
                                        FDCAN_INTERRUPT_LINE0) != HAL_OK)
@@ -305,18 +330,12 @@ int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
         return -1;
     }
 
-    if (HAL_FDCAN_ActivateNotification(&hfdcan1,
-                                       FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
-                                       0) != HAL_OK)
-    {
-        DebugUART_Print("[CAN] ERROR: RX notification activate after start failed\r\n");
-        return -1;
-    }
-
-    DebugUART_Print("[CAN] RX notification active\r\n");
-
     g_can_started = 1;
     g_can_rx_irq_count = 0;
+    g_can_rx_ok_count = 0;
+    g_can_rx_queue_drop_count = 0;
+
+    DebugUART_Print("[CAN] RX notification active\r\n");
 
     DebugUART_Print("[CAN DBG] FDCAN kernel clock=%lu\r\n",
                     (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_FDCAN));
@@ -345,9 +364,6 @@ int CanTask_Open(core_can_mode_t mode, uint32_t bitrate_bps)
     DebugUART_Print("[CAN] channel opened, mode=%lu bitrate=%lu bit/s\r\n",
                     (unsigned long)hfdcan1.Init.Mode,
                     (unsigned long)bitrate_bps);
-    DebugUART_Print("[CAN] NBTP=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->NBTP);
-    DebugUART_Print("[CAN] PSR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->PSR);
-    DebugUART_Print("[CAN] CCCR=0x%08lX\r\n", (unsigned long)hfdcan1.Instance->CCCR);
 
     return 0;
 }

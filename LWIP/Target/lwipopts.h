@@ -53,14 +53,15 @@ extern "C" {
 #define LWIP_ETHERNET                     1
 #define LWIP_DNS_SECURE                   7
 
-#define TCP_SND_QUEUELEN                  (4 * TCP_SND_BUF / TCP_MSS)
+#define TCP_SND_QUEUELEN                  (4 * TCP_SND_BUF / TCP_MSS)      //
 #define TCP_SNDLOWAT                      (4 * TCP_MSS)
 #define TCP_SNDQUEUELOWAT                 16
 #define TCP_WND_UPDATE_THRESHOLD          (TCP_WND / 4)
 
 #define LWIP_NETIF_LINK_CALLBACK          1
+//#define TCPIP_THREAD_STACKSIZE            16384    //было при UDP
 #define TCPIP_THREAD_STACKSIZE            8192
-#define TCPIP_THREAD_PRIO                 ((osPriority_t)osPriorityAboveNormal)
+#define TCPIP_THREAD_PRIO                 ((osPriority_t)osPriorityHigh)
 #define TCPIP_MBOX_SIZE                   32
 #define SLIPIF_THREAD_STACKSIZE           1024
 #define SLIPIF_THREAD_PRIO                3
@@ -135,16 +136,23 @@ extern "C" {
 /* ===== TCP resources ===== */
 #define MEMP_NUM_TCP_PCB                  10
 #define MEMP_NUM_TCP_PCB_LISTEN           6
-#define MEMP_NUM_TCP_SEG                  32
-#define MEMP_NUM_TCPIP_MSG_INPKT          32
+//#define MEMP_NUM_TCP_SEG  				  128    //32
+#define MEMP_NUM_TCPIP_MSG_INPKT          32	//128 UDP
 #define MEMP_NUM_SYS_TIMEOUT              10
 
 #define TCP_MSS                           1460
-#define TCP_SND_BUF                       (8 * TCP_MSS)
-#define TCP_WND                           (8 * TCP_MSS)
+//#define TCP_SND_BUF      				  (24 * TCP_MSS)	//8
+//#define TCP_WND          				  (24 * TCP_MSS)	//8
 
-#define PBUF_POOL_SIZE                    20
+//#define MEM_SIZE                		  (8 * 1024)	//12
 #define PBUF_POOL_BUFSIZE                 1536
+
+/* основные буферы */
+#define MEMP_NUM_TCP_SEG                  32	/* должно быть >= TCP_SND_QUEUELEN = 4*8 = 32, ставим с запасом */
+#define TCP_SND_BUF                       (8 * TCP_MSS)
+#define TCP_WND                           (12 * TCP_MSS)
+#define PBUF_POOL_SIZE                    24
+#define MEM_SIZE                          (8 * 1024)
 
 /* ===== ARP ===== */
 #define ARP_TABLE_SIZE                    10
