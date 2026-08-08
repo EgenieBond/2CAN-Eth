@@ -4,6 +4,7 @@
 "./Core/Src/debug_uart.o"
 "./Core/Src/eth_app.o"
 "./Core/Src/eth_events.o"
+"./Core/Src/eth_raw_test.o"
 "./Core/Src/ethernet_task.o"
 "./Core/Src/fake_client_source.o"
 "./Core/Src/freertos.o"

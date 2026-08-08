@@ -715,27 +715,7 @@ void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
   g_eth_dma_last_error = dma_err;
   g_eth_hal_last_error = HAL_ETH_GetError(handlerEth);
 
-  /* НЕ печатаем здесь: HAL_ETH_ErrorCallback вызывается из контекста
-     прерывания, а DebugUART_Print блокирующий — печать тут стопорит
-     всю систему на несколько мс на каждую ошибку и провоцирует ещё
-     больше ошибок. Детали смотри через ETH_DebugPrintCounters() из
-     обычной задачи, счётчики g_eth_dma_last_error/g_eth_hal_last_error
-     уже сохранены выше. */
-
-  /* КРИТИЧНО: TxPktSemaphore освобождаем ТОЛЬКО при TBU (реальной
-     TX-проблеме), а не безусловно при любой ошибке. RBU — это ошибка
-     приёма, не имеющая отношения к передаче. Безусловный release тут
-     "накачивал" TX-семафор лишними кредитами на каждый RBU (а RBU
-     случается постоянно под нагрузкой), и EthTxTask мог забрать
-     "чужой" кредит и вызвать HAL_ETH_ReleaseTxPacket() для слота,
-     который на самом деле ещё передаётся — портя данные в полёте и
-     ломая внутреннее состояние TX-дескрипторов HAL, вплоть до полной
-     остановки ETH DMA. Именно это было причиной случайных мгновенных
-     зависаний. */
-  if ((dma_err & ETH_DMACSR_TBU) == ETH_DMACSR_TBU)
-  {
-    osSemaphoreRelease(TxPktSemaphore);
-  }
+  osSemaphoreRelease(TxPktSemaphore);
 
   if ((dma_err & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
   {
@@ -790,46 +770,13 @@ static void low_level_init(struct netif *netif)
   LWIP_MEMPOOL_INIT(RX_POOL);
 
   /* Инициализируем TX пул */
-    for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
-    {
-        g_TxPool[i].busy = 0;
-    }
-    g_TxPoolHead = 0;
-    DebugUART_Print("[ETH] TX pool initialized, slots=%u\r\n",
-                    (unsigned)ETH_TX_POOL_SIZE);
-
-    /* Очередь и фоновая задача для асинхронного освобождения TX-слотов.
-       Без неё low_level_output() блокирует tcpip_thread до завершения
-       каждой передачи, а пока он заблокирован — не может забирать
-       кадры из RX-дескрипторов, из-за чего DMA сообщает RBU. */
-    g_TxQueue = osMessageQueueNew(ETH_TX_POOL_SIZE, sizeof(EthTxSlot_t *), NULL);
-    if (g_TxQueue == NULL)
-    {
-      DebugUART_Print("[ETH] ERROR: TxQueue creation failed\r\n");
-    }
-
-    {
-        osThreadAttr_t txAttr;
-        memset(&txAttr, 0, sizeof(txAttr));
-        txAttr.name       = "EthTx";
-        txAttr.stack_size = 2048;
-        /* Выше tcpip_thread/EthIf: эта задача почти всегда спит на
-           семафоре и делает минимум работы при пробуждении (проверка +
-           HAL_ETH_ReleaseTxPacket), поэтому не отнимает заметное время у
-           остальных, зато быстро освобождает TX-слоты и не даёт очереди
-           g_TxQueue переполняться. */
-        txAttr.priority   = (osPriority_t)osPriorityHigh;
-        g_TxTaskHandle = osThreadNew(EthTxTask, NULL, &txAttr);
-    }
-
-    if (g_TxTaskHandle == NULL)
-    {
-      DebugUART_Print("[ETH] ERROR: EthTxTask creation failed\r\n");
-    }
-    else
-    {
-      DebugUART_Print("[ETH] EthTxTask created\r\n");
-    }
+  for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
+  {
+      g_TxPool[i].busy = 0;
+  }
+  g_TxPoolHead = 0;
+  DebugUART_Print("[ETH] TX pool initialized, slots=%u\r\n",
+                  (unsigned)ETH_TX_POOL_SIZE);
 
 #if LWIP_ARP || LWIP_ETHERNET
 
@@ -844,7 +791,7 @@ static void low_level_init(struct netif *netif)
 #endif
 
   RxPktSemaphore = osSemaphoreNew(1, 0, NULL);
-  TxPktSemaphore = osSemaphoreNew(ETH_TX_POOL_SIZE, 0, NULL);
+  TxPktSemaphore = osSemaphoreNew(1, 0, NULL);
 
   if (g_ethLinkEvt == NULL)
   {
@@ -860,19 +807,10 @@ static void low_level_init(struct netif *netif)
                       (unsigned long)APP_ETH_EVT_LINK_UP));
 
   memset(&attributes, 0, sizeof(attributes));
-    attributes.name = "EthIf";
-    attributes.stack_size = 4096;
-    /* ВАЖНО: приоритет должен быть НЕ выше, чем TCPIP_THREAD_PRIO
-       (AboveNormal, см. lwipopts.h). Если поднять EthIf выше — он
-       вытесняет tcpip_thread на каждый входящий кадр, а именно
-       tcpip_thread освобождает буферы RX_POOL через pbuf_free() после
-       разбора TCP-сегмента. При приоритете EthIf > tcpip_thread буферы
-       расходуются быстрее, чем освобождаются — пул прогрессирующе
-       истощается, и скорость падает со временем (проверено на практике:
-       именно это происходило при osPriorityHigh). Равный приоритет даёт
-       честный round-robin между приёмом и обработкой. */
-    attributes.priority = osPriorityAboveNormal;
-    osThreadNew(ethernetif_input, netif, &attributes);
+  attributes.name = "EthIf";
+  attributes.stack_size = 4096;
+  attributes.priority = osPriorityAboveNormal;
+  osThreadNew(ethernetif_input, netif, &attributes);
 
   LAN8742_RegisterBusIO(&LAN8742, &LAN8742_IOCtx);
 
@@ -1017,11 +955,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
         return ERR_IF;
     }
 
-    /* Ищем свободный слот. НЕ блокируемся, если все заняты — просто
-       сообщаем lwIP ERR_MEM. Блокировка здесь недопустима: этот код
-       выполняется в tcpip_thread, и если он зависнет в ожидании TX,
-       он не сможет обрабатывать RX, что переполняет аппаратные
-       RX-дескрипторы и вызывает ошибки DMA (RBU). */
+    /* Ищем свободный слот */
     slot = NULL;
     for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
     {
@@ -1033,13 +967,39 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
         }
     }
 
+    /* Если все слоты заняты — ждём завершения */
     if (slot == NULL)
     {
-        g_tx_submit_fail_cnt++;
+        if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
+        {
+            g_tx_timeout_cnt++;
+            DebugUART_Print("[ETH] TX timeout: no free slot\r\n");
 #if ETH_PAD_SIZE
-        pbuf_header(p, ETH_PAD_SIZE);
+            pbuf_header(p, ETH_PAD_SIZE);
 #endif
-        return ERR_MEM;
+            return ERR_IF;
+        }
+
+        HAL_ETH_ReleaseTxPacket(&heth);
+
+        for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
+        {
+            slot_idx = (g_TxPoolHead + i) % ETH_TX_POOL_SIZE;
+            if (!g_TxPool[slot_idx].busy)
+            {
+                slot = &g_TxPool[slot_idx];
+                break;
+            }
+        }
+
+        if (slot == NULL)
+        {
+            g_tx_submit_fail_cnt++;
+#if ETH_PAD_SIZE
+            pbuf_header(p, ETH_PAD_SIZE);
+#endif
+            return ERR_MEM;
+        }
     }
 
     /* Копируем данные */
@@ -1094,21 +1054,20 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
 
     g_tx_submit_ok_cnt++;
 
-    /* НЕ ждём завершения здесь. Передаём слот в EthTxTask — она сама
-       дождётся аппаратного завершения и освободит слот, а tcpip_thread
-       немедленно вернётся к обработке приёма. */
-    if (osMessageQueuePut(g_TxQueue, &slot, 0, 0) != osOK)
+    /* Блокирующее ожидание завершения */
+    if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
     {
-        /* Не должно происходить (очередь размером с пул), но на
-           всякий случай — освобождаем инлайново, чтобы не потерять
-           слот навсегда. */
-        DebugUART_Print("[ETH] TX queue full, freeing slot inline\r\n");
-        if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) == osOK)
-        {
-            HAL_ETH_ReleaseTxPacket(&heth);
-        }
+        g_tx_timeout_cnt++;
+        DebugUART_Print("[ETH] TX timeout waiting completion\r\n");
         slot->busy = 0;
+#if ETH_PAD_SIZE
+        pbuf_header(p, ETH_PAD_SIZE);
+#endif
+        return ERR_IF;
     }
+
+    HAL_ETH_ReleaseTxPacket(&heth);
+    slot->busy = 0;
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE);
@@ -1159,46 +1118,32 @@ static struct pbuf * low_level_input(struct netif *netif)
  *
  * @param netif the lwip network interface structure for this ethernetif
  */
-void ethernetif_input(void *argument)
+void ethernetif_input(void* argument)
 {
   struct pbuf *p = NULL;
-  struct netif *netif = (struct netif *) argument;
+  struct netif *netif = (struct netif *)argument;
 
-  for(;;)
+  for (;;)
   {
     if (osSemaphoreAcquire(RxPktSemaphore, TIME_WAITING_FOR_INPUT) == osOK)
     {
-      if (RxAllocStatus == RX_ALLOC_ERROR)
-      {
-        continue;
-      }
+      g_rx_sem_cnt++;
 
       do
       {
         p = low_level_input(netif);
-
         if (p != NULL)
         {
-          if (netif->input(p, netif) != ERR_OK)
+          err_t in_err = netif->input(p, netif);
+
+          if (in_err != ERR_OK)
           {
+            g_rx_input_err_cnt++;
+            ETH_DebugPrintCounters("INPUT_ERR");
             pbuf_free(p);
           }
         }
-      }
-      while ((p != NULL) && (RxAllocStatus == RX_ALLOC_OK));
-    }
-    else
-    {
-      uint32_t PHYLinkState = LAN8742_GetLinkState(&LAN8742);
-
-      if(netif_is_link_up(netif) && (PHYLinkState <= LAN8742_STATUS_LINK_DOWN))
-      {
-        tcpip_callback(netif_link_down_in_tcpip, netif);
-      }
-      else if(!netif_is_link_up(netif) && (PHYLinkState > LAN8742_STATUS_LINK_DOWN))
-      {
-        tcpip_callback(netif_link_up_in_tcpip, netif);
-      }
+      } while (p != NULL);
     }
   }
 }

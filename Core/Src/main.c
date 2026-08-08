@@ -20,6 +20,7 @@
 #include "core_task.h"
 #include "can_task.h"
 #include <string.h>
+#include "eth_raw_test.h"
 
 extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
@@ -86,6 +87,13 @@ void StartDefaultTask(void *argument);
  */
 #define CAN_ONLY_DIRECT_TEST_LOOPBACK 0
 #define CAN_ONLY_DIRECT_TEST_BITRATE 500000U
+
+/*
+ * 1 = диагностический raw-Ethernet тест (по просьбе начальника):
+ *     отправка сырых кадров напрямую в обход TCP/UDP/IP.
+ *     Не запускает обычный TCP-сервер/CAN-конвейер.
+ */
+#define ETH_RAW_LINK_TEST 0
 
 static void CanOnlyDirectTest_Run(void);
 /* USER CODE END 0 */
@@ -684,6 +692,18 @@ void StartDefaultTask(void *argument)
    * Проверяется только FDCAN и физическая CAN-шина.
    */
   CanOnlyDirectTest_Run();
+#elif ETH_RAW_LINK_TEST
+  /*
+   * Raw-Ethernet тест: только базовая инициализация Ethernet
+   * (MX_LWIP_Init уже выполнена выше), TCP-сервер и CAN-конвейер
+   * не запускаются — они не нужны для этого теста.
+   */
+  EthRawTest_Start();
+
+  for (;;)
+  {
+    osDelay(1000);
+  }
 #else
   /* pipeline */
   EthApp_Init();
