@@ -59,6 +59,7 @@ extern "C" {
 #define TCP_WND_UPDATE_THRESHOLD          (TCP_WND / 4)
 
 #define LWIP_NETIF_LINK_CALLBACK          1
+//#define TCPIP_THREAD_STACKSIZE            16384    //было при UDP
 #define TCPIP_THREAD_STACKSIZE            8192
 #define TCPIP_THREAD_PRIO                 ((osPriority_t)osPriorityAboveNormal)
 #define TCPIP_MBOX_SIZE                   32
@@ -136,7 +137,7 @@ extern "C" {
 #define MEMP_NUM_TCP_PCB                  10
 #define MEMP_NUM_TCP_PCB_LISTEN           6
 //#define MEMP_NUM_TCP_SEG  				  128    //32
-#define MEMP_NUM_TCPIP_MSG_INPKT          32
+#define MEMP_NUM_TCPIP_MSG_INPKT          32	//128 UDP
 #define MEMP_NUM_SYS_TIMEOUT              10
 
 #define TCP_MSS                           1460

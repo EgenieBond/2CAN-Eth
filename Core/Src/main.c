@@ -20,6 +20,8 @@
 #include "core_task.h"
 #include "can_task.h"
 #include <string.h>
+#include "eth_raw_test.h"
+#include "eth_loopback_test.h"
 
 extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
@@ -87,9 +89,29 @@ void StartDefaultTask(void *argument);
 #define CAN_ONLY_DIRECT_TEST_LOOPBACK 0
 #define CAN_ONLY_DIRECT_TEST_BITRATE 500000U
 
+/*
+ * 1 = диагностический raw-Ethernet тест (по просьбе начальника):
+ *     отправка сырых кадров напрямую в обход TCP/UDP/IP.
+ *     Не запускает обычный TCP-сервер/CAN-конвейер.
+ */
+#define ETH_RAW_LINK_TEST 0
+
+/*
+ * 1 = диагностический тест: плата отправляет и принимает данные САМА
+ *     СЕБЕ через внутренний loopback PHY-микросхемы (LAN8742), без
+ *     выхода в кабель и без участия внешнего клиента. Проверяет
+ *     логику платы (DMA/TX/RX-пути) в изоляции от внешних факторов
+ *     (кабель, коммутатор, сетевой стек ПК).
+ */
+#define ETH_LOOPBACK_TEST 0
+
 static void CanOnlyDirectTest_Run(void);
 /* USER CODE END 0 */
 
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 /**
   * @brief  The application entry point.
   * @retval int
@@ -99,10 +121,10 @@ int main(void)
   /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
 
-  MPU_Config();
-
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
+  /* Disable unaligned access trap (temporary) */
   SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
   __DSB();
   __ISB();
@@ -112,11 +134,16 @@ int main(void)
   boot_cnt++;
   /* USER CODE END Init */
 
+  /* Configure the system clock */
   SystemClock_Config();
+
+  /* MPU Configuration -- после установки тактирования --------------------*/
+  MPU_Config();
 
   /* USER CODE BEGIN SysInit */
   /* USER CODE END SysInit */
 
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART3_UART_Init();
 
@@ -147,36 +174,52 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Supply configuration update enable
+  */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_HSE);
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
-  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 128;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
-                              | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -364,8 +407,6 @@ static void MX_USART3_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART3_Init 2 */
-  uint8_t test_msg[] = "\r\n=== USART3 INIT OK (PD8/PD9) ===\r\n";
-  HAL_UART_Transmit(&huart3, test_msg, sizeof(test_msg)-1, 100);
   /* USER CODE END USART3_Init 2 */
 
 }
@@ -643,22 +684,33 @@ void StartDefaultTask(void *argument)
   __DSB();
   __ISB();
 
-
-  DebugUART_Print("[CPU] CCR = 0x%08lX\r\n", SCB->CCR);
   /* init lwIP */
   MX_LWIP_Init();
 
   /* init FDCAN before CAN task start */
   MX_FDCAN1_Init();
-  DebugUART_Print("[BOOT] after FDCAN1 init\r\n");
 
 #if CAN_ONLY_DIRECT_TEST
-  /*
-   * Автономный CAN-only режим:
-   * Ethernet/Core/CanTask не запускаются.
-   * Проверяется только FDCAN и физическая CAN-шина.
-   */
   CanOnlyDirectTest_Run();
+#elif ETH_RAW_LINK_TEST
+  EthRawTest_Start();
+
+  for (;;)
+  {
+    osDelay(1000);
+  }
+#elif ETH_LOOPBACK_TEST
+  /*
+   * Loopback-тест не требует CAN/TCP-конвейера — MX_LWIP_Init() уже
+   * выполнена выше (запустила heth, RxPktSemaphore/TxPktSemaphore,
+   * EthTxTask и ethernetif_input), этого достаточно для работы теста.
+   */
+  EthLoopbackTest_Start();
+
+  for (;;)
+  {
+    osDelay(1000);
+  }
 #else
   /* pipeline */
   EthApp_Init();
@@ -676,7 +728,6 @@ void StartDefaultTask(void *argument)
 }
 
  /* MPU Configuration */
-
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
@@ -755,6 +806,7 @@ void Error_Handler(void)
   * @param  line: assert_param error line source number
   * @retval None
   */
+
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */

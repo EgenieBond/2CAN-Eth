@@ -1,13 +1,14 @@
 /*
  * raw_tcp_server.c
  *
- * TCP RAW server (single client)
+ * TCP RAW server (single client) + UDP benchmark mode
  */
 
 #include "raw_tcp_server.h"
 #include "client_handler.h"
 
 #include "lwip/tcp.h"
+#include "lwip/udp.h"
 #include "lwip/inet.h"
 #include "lwip/tcpip.h"
 
@@ -22,10 +23,17 @@
 /*
  * ETH_BENCHMARK_MODE:
  *   0 = обычный рабочий режим (SLCAN)
- *   1 = Тест 1: ПК -> плата. Плата только считает входящие байты.
- *   2 = Тест 2: плата -> ПК. Плата сама генерирует и льёт данные клиенту.
+ *   1 = Тест 1: ПК -> плата. Плата только считает входящие байты (TCP).
+ *   2 = Тест 2: плата -> ПК. Плата сама генерирует и льёт данные клиенту (TCP).
+ *   3 = Тест 3: ПК -> плата. UDP — максимальная скорость без TCP overhead.
  */
 #define ETH_BENCHMARK_MODE 1
+
+//#define BENCH_TARGET_BYTES  (100UL * 1024UL * 1024UL)
+#define BENCH_TARGET_BYTES  (1024UL * 1024UL * 1024UL)   /* 1 ГБ вместо 100 МБ — */
+#define BENCH_PRINT_STEP    (10UL  * 1024UL * 1024UL)
+
+/* ===== TX ring (используется только в режиме 0) ===== */
 
 #define RAW_TCP_TX_RING_SIZE 8192
 
@@ -40,20 +48,15 @@ static volatile uint8_t g_tx_flush_scheduled = 0;
 static uint32_t g_tx_drop_count = 0;
 static uint32_t g_tcp_err_mem_count = 0;
 
-/* ===== Benchmark state ===== */
+/* ===== Benchmark state (TCP MODE 1/2) ===== */
 #if (ETH_BENCHMARK_MODE == 1) || (ETH_BENCHMARK_MODE == 2)
-
-#define BENCH_TARGET_BYTES  (100UL * 1024UL * 1024UL)   /* 100 МБ */
-#define BENCH_PRINT_STEP    (10UL  * 1024UL * 1024UL)   /* прогресс каждые 10 МБ */
 
 static uint32_t g_bench_bytes      = 0;
 static uint32_t g_bench_last_print = 0;
 static uint32_t g_bench_start_tick = 0;
+static uint32_t g_bench_start_tick_abs = 0;
 static uint8_t  g_bench_started    = 0;
 static uint8_t  g_bench_done       = 0;
-static uint32_t g_bench_start_tick_abs = 0;
-
-//#include "lwip/stats.h"
 
 static void Bench_PrintProgress(void)
 {
@@ -80,35 +83,148 @@ static void Bench_PrintProgress(void)
                     (unsigned long)(speed_kbps / 1000UL),
                     (unsigned)rcv_wnd,
                     (unsigned long)rcv_nxt);
+
+    ETH_DebugPrintCounters("BENCH");
 }
 
 static void Bench_Reset(void)
 {
-    g_bench_bytes      = 0;
-    g_bench_last_print = 0;
-    g_bench_start_tick = 0;
+    g_bench_bytes          = 0;
+    g_bench_last_print     = 0;
+    g_bench_start_tick     = 0;
     g_bench_start_tick_abs = 0;
-    g_bench_started    = 0;
-    g_bench_done       = 0;
+    g_bench_started        = 0;
+    g_bench_done           = 0;
 }
 
 #endif /* ETH_BENCHMARK_MODE 1 or 2 */
 
+/* ===== UDP Benchmark (MODE 3) ===== */
+#if (ETH_BENCHMARK_MODE == 3)
+
+#define UDP_SERVER_PORT     2002U
+
+static struct udp_pcb *udp_bench_pcb = NULL;
+
+static uint32_t g_udp_bytes         = 0;
+static uint32_t g_udp_last_print    = 0;
+static uint32_t g_udp_start_tick    = 0;
+static uint8_t  g_udp_started       = 0;
+static uint8_t  g_udp_done          = 0;
+static uint32_t g_udp_pkts_received = 0;
+
+static void UdpBench_PrintProgress(void)
+{
+    uint32_t elapsed_ms = osKernelGetTickCount() - g_udp_start_tick;
+    uint32_t speed_kbps = 0;
+
+    if (elapsed_ms > 0)
+    {
+        speed_kbps = (uint32_t)((uint64_t)g_udp_bytes * 8ULL / elapsed_ms);
+    }
+
+    DebugUART_Print("[UDP BENCH] %lu MB | %lu ms | %lu Kbit/s (%lu Mbit/s)\r\n",
+                    (unsigned long)(g_udp_bytes / (1024UL * 1024UL)),
+                    (unsigned long)elapsed_ms,
+                    (unsigned long)speed_kbps,
+                    (unsigned long)(speed_kbps / 1000UL));
+
+    DebugUART_Print("[UDP BENCH] pkts received=%lu\r\n",
+                    (unsigned long)g_udp_pkts_received);
+}
+
+static void udp_bench_recv(void *arg,
+                           struct udp_pcb *pcb,
+                           struct pbuf *p,
+                           const ip_addr_t *addr,
+                           u16_t port)
+{
+    LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(pcb);
+    LWIP_UNUSED_ARG(addr);
+    LWIP_UNUSED_ARG(port);
+
+    if (p == NULL) { return; }
+
+    if (!g_udp_started)
+    {
+        g_udp_started        = 1;
+        g_udp_done           = 0;
+        g_udp_start_tick     = osKernelGetTickCount();
+        g_udp_pkts_received  = 0;
+        DebugUART_Print("[UDP BENCH] === START === tick=%lu ms\r\n",
+                        (unsigned long)g_udp_start_tick);
+    }
+
+    if (!g_udp_done)
+    {
+        g_udp_pkts_received++;
+        g_udp_bytes += p->tot_len;
+
+        if ((g_udp_bytes - g_udp_last_print) >= BENCH_PRINT_STEP)
+        {
+            g_udp_last_print = g_udp_bytes;
+            UdpBench_PrintProgress();
+        }
+
+        if (g_udp_bytes >= BENCH_TARGET_BYTES)
+        {
+            g_udp_done = 1;
+
+            uint32_t end_tick   = osKernelGetTickCount();
+            uint32_t elapsed_ms = end_tick - g_udp_start_tick;
+            uint32_t speed_kbps = 0;
+
+            if (elapsed_ms > 0)
+            {
+                speed_kbps = (uint32_t)((uint64_t)g_udp_bytes * 8ULL / elapsed_ms);
+            }
+
+            /* Считаем сколько пакетов должно было прийти при chunk=1400 */
+            uint32_t expected_pkts = (BENCH_TARGET_BYTES + 1399U) / 1400U;
+            uint32_t lost_pkts     = (expected_pkts > g_udp_pkts_received)
+                                     ? (expected_pkts - g_udp_pkts_received) : 0U;
+            float    lost_pct      = (expected_pkts > 0)
+                                     ? ((float)lost_pkts / (float)expected_pkts * 100.0f)
+                                     : 0.0f;
+
+            DebugUART_Print("[UDP BENCH] === DONE ===\r\n");
+            DebugUART_Print("[UDP BENCH] start tick    : %lu ms\r\n",
+                            (unsigned long)g_udp_start_tick);
+            DebugUART_Print("[UDP BENCH] end tick      : %lu ms\r\n",
+                            (unsigned long)end_tick);
+            DebugUART_Print("[UDP BENCH] duration      : %lu ms\r\n",
+                            (unsigned long)elapsed_ms);
+            DebugUART_Print("[UDP BENCH] total bytes   : %lu\r\n",
+                            (unsigned long)g_udp_bytes);
+            DebugUART_Print("[UDP BENCH] pkts received : %lu\r\n",
+                            (unsigned long)g_udp_pkts_received);
+            DebugUART_Print("[UDP BENCH] pkts expected : %lu\r\n",
+                            (unsigned long)expected_pkts);
+            DebugUART_Print("[UDP BENCH] pkts lost     : %lu (%.1f%%)\r\n",
+                            (unsigned long)lost_pkts,
+                            (double)lost_pct);
+            DebugUART_Print("[UDP BENCH] avg speed     : %lu Kbit/s (%lu Mbit/s)\r\n",
+                            (unsigned long)speed_kbps,
+                            (unsigned long)(speed_kbps / 1000UL));
+        }
+    }
+
+    pbuf_free(p);
+}
+
+#endif /* ETH_BENCHMARK_MODE == 3 */
+
 /* ===== Тест 2: генератор данных плата -> ПК ===== */
 #if (ETH_BENCHMARK_MODE == 2)
 
-/*
- * Буфер с фиксированными данными для отправки.
- * Плата льёт его повторно пока не дойдёт до BENCH_TARGET_BYTES.
- */
-#define BENCH_TX_BUF_SIZE   1460U   /* один TCP сегмент */
+#define BENCH_TX_BUF_SIZE   1460U
 
 static uint8_t g_bench_tx_buf[BENCH_TX_BUF_SIZE];
 static uint8_t g_bench_tx_buf_ready = 0;
 
 static void Bench_TxInit(void)
 {
-    /* заполняем буфер один раз фиксированным паттерном */
     for (uint32_t i = 0; i < BENCH_TX_BUF_SIZE; i++)
     {
         g_bench_tx_buf[i] = (uint8_t)(i & 0xFFU);
@@ -116,16 +232,11 @@ static void Bench_TxInit(void)
     g_bench_tx_buf_ready = 1;
 }
 
-/*
- * Вызывается из tcpip_thread — льём данные пока есть место в send buffer.
- */
 static void Bench_TxPump(void)
 {
-    if (client_pcb == NULL)    { DebugUART_Print("[BENCH TX] pump: no client\r\n"); return; }
-    if (!g_bench_tx_buf_ready) { DebugUART_Print("[BENCH TX] pump: buf not ready\r\n"); return; }
-    if (g_bench_done)          { return; }
-
-    uint32_t iterations = 0;
+    if (client_pcb == NULL)       { return; }
+    if (!g_bench_tx_buf_ready)    { return; }
+    if (g_bench_done)             { return; }
 
     for (;;)
     {
@@ -141,19 +252,7 @@ static void Bench_TxPump(void)
         }
 
         u16_t sndbuf = tcp_sndbuf(client_pcb);
-
-        if (iterations == 0)
-        {
-            DebugUART_Print("[BENCH TX] pump enter: sndbuf=%u bytes_sent=%lu\r\n",
-                            (unsigned)sndbuf, (unsigned long)g_bench_bytes);
-        }
-
-        if (sndbuf < BENCH_TX_BUF_SIZE)
-        {
-            DebugUART_Print("[BENCH TX] sndbuf too small=%u, waiting sent cb\r\n",
-                            (unsigned)sndbuf);
-            break;
-        }
+        if (sndbuf < BENCH_TX_BUF_SIZE) { break; }
 
         uint32_t remaining = BENCH_TARGET_BYTES - g_bench_bytes;
         uint16_t to_send   = (remaining >= BENCH_TX_BUF_SIZE)
@@ -161,35 +260,30 @@ static void Bench_TxPump(void)
                              : (uint16_t)remaining;
 
         err_t wr = tcp_write(client_pcb, g_bench_tx_buf, to_send, TCP_WRITE_FLAG_COPY);
+        if (wr == ERR_MEM) { break; }
+        if (wr != ERR_OK)
+        {
+            DebugUART_Print("[BENCH TX] tcp_write err=%d\r\n", (int)wr);
+            break;
+        }
 
-                if (wr == ERR_MEM) { break; }
-                if (wr != ERR_OK)  { DebugUART_Print("[BENCH TX] tcp_write err=%d\r\n", (int)wr); break; }
+        g_bench_bytes += to_send;
 
-                g_bench_bytes += to_send;
+        if ((g_bench_bytes - g_bench_last_print) >= BENCH_PRINT_STEP)
+        {
+            g_bench_last_print = g_bench_bytes;
+            Bench_PrintProgress();
+        }
+    }
 
+    if (client_pcb != NULL)
+    {
         err_t out = tcp_output(client_pcb);
         if (out != ERR_OK)
         {
             DebugUART_Print("[BENCH TX] tcp_output err=%d\r\n", (int)out);
-            break;
         }
-
-        if ((g_bench_bytes - g_bench_last_print) >= BENCH_PRINT_STEP)
-                {
-                    g_bench_last_print = g_bench_bytes;
-                    Bench_PrintProgress();
-                }
-        }
-
-    /* один tcp_output после всего цикла */
-        if (client_pcb != NULL)
-        {
-            err_t out = tcp_output(client_pcb);
-            if (out != ERR_OK)
-            {
-                DebugUART_Print("[BENCH TX] tcp_output err=%d\r\n", (int)out);
-            }
-        }
+    }
 }
 
 static void bench_tx_start_cb(void *arg)
@@ -201,7 +295,7 @@ static void bench_tx_start_cb(void *arg)
 
 #endif /* ETH_BENCHMARK_MODE == 2 */
 
-/* ===== TX ring (используется только в режиме 0) ===== */
+/* ===== TX ring ===== */
 
 static uint32_t RawTcp_TxUsed(void)
 {
@@ -216,8 +310,8 @@ static uint32_t RawTcp_TxFree(void)
 
 static void RawTcp_TxReset(void)
 {
-    g_tx_head = 0;
-    g_tx_tail = 0;
+    g_tx_head            = 0;
+    g_tx_tail            = 0;
     g_tx_flush_scheduled = 0;
 }
 
@@ -251,8 +345,8 @@ static int RawTcp_TxPush(const uint8_t *data, size_t len)
 
 static uint32_t RawTcp_TxContiguousLen(void)
 {
-    if (g_tx_head == g_tx_tail)  { return 0; }
-    if (g_tx_head > g_tx_tail)   { return g_tx_head - g_tx_tail; }
+    if (g_tx_head == g_tx_tail) { return 0; }
+    if (g_tx_head > g_tx_tail)  { return g_tx_head - g_tx_tail; }
     return RAW_TCP_TX_RING_SIZE - g_tx_tail;
 }
 
@@ -286,12 +380,6 @@ static void RawTcp_TryFlush(void)
         if (wr == ERR_MEM)
         {
             g_tcp_err_mem_count++;
-            if ((g_tcp_err_mem_count % 100U) == 0U)
-            {
-                DebugUART_Print("[TCP] tcp_write ERR_MEM count=%lu sndbuf=%u\r\n",
-                                (unsigned long)g_tcp_err_mem_count,
-                                (unsigned)sndbuf);
-            }
             break;
         }
 
@@ -321,8 +409,8 @@ static void raw_tcp_flush_cb(void *arg)
 
 static void RawTcp_ScheduleFlush(void)
 {
-    if (client_pcb == NULL)      { return; }
-    if (g_tx_flush_scheduled)    { return; }
+    if (client_pcb == NULL)   { return; }
+    if (g_tx_flush_scheduled) { return; }
     g_tx_flush_scheduled = 1;
 
     err_t cb_err = tcpip_callback(raw_tcp_flush_cb, NULL);
@@ -342,7 +430,7 @@ static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
     LWIP_UNUSED_ARG(len);
 
 #if (ETH_BENCHMARK_MODE == 2)
-    Bench_TxPump();   /* отправили — пробуем залить ещё */
+    Bench_TxPump();
 #else
     RawTcp_TryFlush();
 #endif
@@ -354,6 +442,27 @@ static void tcp_server_error(void *arg, err_t err)
 {
     LWIP_UNUSED_ARG(arg);
     DebugUART_Print("[TCP] ERROR cb err=%d\r\n", (int)err);
+    DebugUART_Print("[TCP] TX drop count=%lu ERR_MEM count=%lu\r\n",
+                    (unsigned long)g_tx_drop_count,
+                    (unsigned long)g_tcp_err_mem_count);
+
+    /* Полная статистика ETH прямо в момент обрыва — особенно важно
+       для случаев, когда сбой происходит ДО первого порогового
+       принта Bench_PrintProgress (то есть меньше 10 МБ передано) и
+       иначе остаётся совершенно не видно, что творилось внутри. */
+    ETH_DebugPrintCounters("TCP-ERR");
+
+#if (ETH_BENCHMARK_MODE == 1)
+    if (g_bench_started)
+    {
+        Bench_PrintProgress();
+    }
+    else
+    {
+        DebugUART_Print("[BENCH RX] error before first byte received\r\n");
+    }
+#endif
+
     client_pcb = NULL;
     RawTcp_TxReset();
 }
@@ -370,7 +479,6 @@ static err_t tcp_server_recv(void *arg,
         DebugUART_Print("[TCP] Client disconnected\r\n");
 
 #if (ETH_BENCHMARK_MODE == 1)
-        /* финальный отчёт при дисконнекте */
         if (g_bench_started)
         {
             Bench_PrintProgress();
@@ -401,22 +509,31 @@ static err_t tcp_server_recv(void *arg,
         return err;
     }
 
+    /*
+     * tcp_output() здесь убран сознательно.
+     *
+     * tcp_recved() только сообщает lwIP, что окно приёма увеличилось;
+     * САМ факт отправки ACK-сегмента lwIP решает через собственный
+     * механизм delayed ACK (обычно раз на каждые 2 полных сегмента,
+     * либо по таймеру ~200 мс). Форсированный tcp_output() на КАЖДЫЙ
+     * входящий пакет заставлял low_level_output() гонять TX-путь
+     * (и раньше — блокироваться на DMA) при каждом recv-событии,
+     * что на высокой скорости конкурировало с обработкой RX внутри
+     * того же tcpip_thread и вызывало нехватку RX-буферов (RBU).
+     * lwIP сам вызовет tcp_output() из delayed-ACK таймера, когда
+     * ACK действительно нужно отправить.
+     */
     tcp_recved(tpcb, p->tot_len);
-    tcp_output(tpcb);   /* немедленно отправляем ACK, не ждём таймер */
 
     for (struct pbuf *q = p; q != NULL; q = q->next)
     {
         const uint16_t len = q->len;
 
 #if (ETH_BENCHMARK_MODE == 1)
-        /*
-         * Тест 1: ПК -> плата.
-         * Просто считаем байты, ничего не отвечаем.
-         */
         if (!g_bench_started && len > 0)
         {
-            g_bench_started       = 1;
-            g_bench_start_tick    = osKernelGetTickCount();
+            g_bench_started        = 1;
+            g_bench_start_tick     = osKernelGetTickCount();
             g_bench_start_tick_abs = g_bench_start_tick;
             DebugUART_Print("[BENCH RX] === START === tick=%lu ms\r\n",
                             (unsigned long)g_bench_start_tick);
@@ -461,16 +578,9 @@ static err_t tcp_server_recv(void *arg,
         }
 
 #elif (ETH_BENCHMARK_MODE == 2)
-        /*
-         * Тест 2: плата -> ПК.
-         * Входящие данные игнорируем (ПК ничего не шлёт).
-         */
         (void)len;
 
 #else
-        /*
-         * Обычный режим — передаём в ClientHandler.
-         */
         ClientHandler_InputBytes((const uint8_t *)q->payload, len);
 #endif
     }
@@ -570,10 +680,13 @@ void RawTcpServer_Init(void)
     DebugUART_Print("[BENCH] MODE 1: PC -> STM32 (RX speed test)\r\n");
 #elif (ETH_BENCHMARK_MODE == 2)
     DebugUART_Print("[BENCH] MODE 2: STM32 -> PC (TX speed test)\r\n");
+#elif (ETH_BENCHMARK_MODE == 3)
+    DebugUART_Print("[UDP BENCH] MODE 3: PC -> STM32 (UDP RX speed test)\r\n");
 #else
     DebugUART_Print("[TCP] Normal SLCAN mode\r\n");
 #endif
 
+#if (ETH_BENCHMARK_MODE != 3)
     server_pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
     if (server_pcb == NULL)
     {
@@ -600,4 +713,30 @@ void RawTcpServer_Init(void)
 
     tcp_accept(server_pcb, tcp_server_accept);
     DebugUART_Print("[TCP] Listening on port %d\r\n", TCP_SERVER_PORT);
+#endif
+
+#if (ETH_BENCHMARK_MODE == 3)
+    udp_bench_pcb = udp_new_ip_type(IPADDR_TYPE_V4);
+
+    if (udp_bench_pcb == NULL)
+    {
+        DebugUART_Print("[UDP BENCH] udp_new failed\r\n");
+        return;
+    }
+
+    err_t udp_err = udp_bind(udp_bench_pcb, IP_ANY_TYPE, UDP_SERVER_PORT);
+
+    if (udp_err != ERR_OK)
+    {
+        DebugUART_Print("[UDP BENCH] udp_bind failed err=%d\r\n", (int)udp_err);
+        udp_remove(udp_bench_pcb);
+        udp_bench_pcb = NULL;
+        return;
+    }
+
+    udp_recv(udp_bench_pcb, udp_bench_recv, NULL);
+
+    DebugUART_Print("[UDP BENCH] Listening on UDP port %u\r\n",
+                    (unsigned)UDP_SERVER_PORT);
+#endif
 }

@@ -127,9 +127,7 @@ static void PHY_Scan(void)
 static void tcp_server_init_cb(void *arg)
 {
   (void)arg;
-  DebugUART_Print("[TCP] init cb: running in tcpip_thread\r\n");
   RawTcpServer_Init();
-  DebugUART_Print("[TCP] init cb: RawTcpServer_Init done\r\n");
 }
 
 //-------------------------------------------------------------------------------
@@ -137,93 +135,53 @@ void EthernetTask(void *argument)
 {
   (void)argument;
 
-  const char *boot = "\r\n[ETH] EthernetTask ENTER (HAL_UART_Transmit)\r\n";
-  HAL_UART_Transmit(&huart3, (uint8_t*)boot, (uint16_t)strlen(boot), 100);
-
-  //DebugUART_Print("[ETH] Ethernet task started (DebugUART)\r\n");
-
   DumpMemLayout();
 
   /* 1) Ждём LINK_UP по событию (если оно есть), иначе fallback polling */
-DebugUART_Print("[ETH] waiting LINK UP (event)... evt=%p mask=0x%08lX\r\n",
-                (void*)g_ethLinkEvt, (unsigned long)APP_ETH_EVT_LINK_UP);
-
-if (g_ethLinkEvt)
-{
-  uint32_t w = osEventFlagsWait(g_ethLinkEvt,
-                               APP_ETH_EVT_LINK_UP,
-                               osFlagsWaitAny,
-                               osWaitForever);
-
-  DebugUART_Print("[ETH] wait returned=0x%08lX now_get=0x%08lX\r\n",
-                  (unsigned long)w,
-                  (unsigned long)osEventFlagsGet(g_ethLinkEvt));
-
-  /* если ошибка — это будет 0xFFFFFFxx */
-  if ((int32_t)w < 0)
+  if (g_ethLinkEvt)
   {
-    DebugUART_Print("[ETH] osEventFlagsWait ERROR: 0x%08lX\r\n", (unsigned long)w);
-    /* fallback: не зависаем навсегда */
-    while (!netif_is_link_up(&gnetif)) osDelay(50);
+    uint32_t w = osEventFlagsWait(g_ethLinkEvt,
+                                 APP_ETH_EVT_LINK_UP,
+                                 osFlagsWaitAny,
+                                 osWaitForever);
+
+    /* если ошибка — это будет 0xFFFFFFxx */
+    if ((int32_t)w < 0)
+    {
+      DebugUART_Print("[ETH] osEventFlagsWait ERROR: 0x%08lX\r\n", (unsigned long)w);
+      /* fallback: не зависаем навсегда */
+      while (!netif_is_link_up(&gnetif)) osDelay(50);
+    }
   }
   else
   {
-    DebugUART_Print("[ETH] osEventFlagsWait OK: flags=0x%08lX\r\n", (unsigned long)w);
+    DebugUART_Print("[ETH] WARNING: g_ethLinkEvt is NULL -> fallback polling\r\n");
+    while (!netif_is_link_up(&gnetif)) osDelay(50);
   }
-}
-else
-{
-  DebugUART_Print("[ETH] WARNING: g_ethLinkEvt is NULL -> fallback polling\r\n");
-  while (!netif_is_link_up(&gnetif)) osDelay(50);
-}
 
-  DebugUART_Print("[ETH] LINK UP (task sees it)\r\n");
+  DebugUART_Print("[CPU] SystemCoreClock = %lu Hz (%lu MHz)\r\n",
+                  (unsigned long)SystemCoreClock,
+                  (unsigned long)(SystemCoreClock / 1000000UL));
 
   /* 2) Теперь PHY дамп корректен */
   //PHY_Dump();
   //PHY_Scan();
 
-  /* 3) IP */
-  DebugUART_Print("[ETH] My IP: %d.%d.%d.%d\r\n",
-                  ip4_addr1(netif_ip4_addr(&gnetif)),
-                  ip4_addr2(netif_ip4_addr(&gnetif)),
-                  ip4_addr3(netif_ip4_addr(&gnetif)),
-                  ip4_addr4(netif_ip4_addr(&gnetif)));
-  DebugUART_Print("[ETH] netif flags=0x%02X\r\n", (unsigned)gnetif.flags);
-  DebugUART_Print("[ETH] netif MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
-                  gnetif.hwaddr[0], gnetif.hwaddr[1], gnetif.hwaddr[2],
-                  gnetif.hwaddr[3], gnetif.hwaddr[4], gnetif.hwaddr[5]);
-
   while (!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif)) {
-    DebugUART_Print("[ETH] waiting netif up/link... up=%d link=%d\r\n",
-                    netif_is_up(&gnetif), netif_is_link_up(&gnetif));
     osDelay(100);
   }
 
-  if (ip4_addr4(netif_ip4_addr(&gnetif)) == 100)
-  {
-      DebugUART_Print("[ETH] IP check OK: netif has 10.0.0.100\r\n");
-  }
-  else
-  {
-      DebugUART_Print("[ETH] IP check FAIL\r\n");
-  }
-
   /* 4) Стартуем RAW TCP server в tcpip_thread */
-  DebugUART_Print("[ETH] starting RAW TCP server...\r\n");
   err_t cb_err = tcpip_callback(tcp_server_init_cb, NULL);
-  DebugUART_Print("[ETH] tcpip_callback(raw server) -> %d\r\n", (int)cb_err);
+  if (cb_err != ERR_OK)
+  {
+    DebugUART_Print("[ETH] ERROR: tcpip_callback(raw server) failed, err=%d\r\n",
+                    (int)cb_err);
+  }
 
   for (;;)
   {
     osDelay(10000);
-    /*
-
-    DebugUART_Print("[ETH] heartbeat: link=%d up=%d flags=0x%02X\r\n",
-                    netif_is_link_up(&gnetif) ? 1 : 0,
-                    netif_is_up(&gnetif) ? 1 : 0,
-                    (unsigned)gnetif.flags);
-    */
 
     static uint32_t last_irq = 0, last_sem = 0;
 
@@ -247,6 +205,4 @@ void EthernetTask_Start(void)
 
   if (ethTaskHandle == NULL)
     DebugUART_Print("[ETH] ERROR: osThreadNew(EthernetTask) failed\r\n");
-  else
-    DebugUART_Print("[ETH] EthernetTask thread created\r\n");
 }

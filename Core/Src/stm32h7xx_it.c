@@ -159,31 +159,14 @@ void BusFault_Handler(void)
   */
 void UsageFault_Handler(void)
 {
-  DebugUART_Print("\r\n!!! USAGE FAULT !!!\r\n");
+  /* USER CODE BEGIN UsageFault_IRQn 0 */
 
-  uint32_t *sp;
-  __asm volatile(
-      "tst lr, #4\n"
-      "ite eq\n"
-      "mrseq %0, msp\n"
-      "mrsne %0, psp\n"
-      : "=r"(sp)
-  );
-
-  DebugUART_Print("R0  = 0x%08lX\r\n", sp[0]);
-  DebugUART_Print("R1  = 0x%08lX\r\n", sp[1]);
-  DebugUART_Print("R2  = 0x%08lX\r\n", sp[2]);
-  DebugUART_Print("R3  = 0x%08lX\r\n", sp[3]);
-  DebugUART_Print("R12 = 0x%08lX\r\n", sp[4]);
-  DebugUART_Print("LR  = 0x%08lX\r\n", sp[5]);
-  DebugUART_Print("PC  = 0x%08lX\r\n", sp[6]);
-  DebugUART_Print("PSR = 0x%08lX\r\n", sp[7]);
-
-  DebugUART_Print("HFSR = 0x%08lX\r\n", SCB->HFSR);
-  DebugUART_Print("CFSR = 0x%08lX\r\n", SCB->CFSR);
-  DebugUART_Print("UFSR = 0x%04lX\r\n", (SCB->CFSR >> 16) & 0xFFFF);
-
-  while (1) { }
+  /* USER CODE END UsageFault_IRQn 0 */
+  while (1)
+  {
+    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
+    /* USER CODE END W1_UsageFault_IRQn 0 */
+  }
 }
 
 /**
@@ -204,16 +187,21 @@ void DebugMon_Handler(void)
   */
 void SysTick_Handler(void)
 {
-  HAL_IncTick();
+  /* USER CODE BEGIN SysTick_IRQn 0 */
 
-#if (INCLUDE_xTaskGetSchedulerState == 1)
+  /* USER CODE END SysTick_IRQn 0 */
+  HAL_IncTick();
+#if (INCLUDE_xTaskGetSchedulerState == 1 )
   if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
   {
-    xPortSysTickHandler();
-  }
-#else
+#endif /* INCLUDE_xTaskGetSchedulerState */
   xPortSysTickHandler();
-#endif
+#if (INCLUDE_xTaskGetSchedulerState == 1 )
+  }
+#endif /* INCLUDE_xTaskGetSchedulerState */
+  /* USER CODE BEGIN SysTick_IRQn 1 */
+
+  /* USER CODE END SysTick_IRQn 1 */
 }
 
 /******************************************************************************/
@@ -228,8 +216,13 @@ void SysTick_Handler(void)
   */
 void ETH_IRQHandler(void)
 {
-  g_eth_irq_handler_cnt++;
+  /* USER CODE BEGIN ETH_IRQn 0 */
+
+  /* USER CODE END ETH_IRQn 0 */
   HAL_ETH_IRQHandler(&heth);
+  /* USER CODE BEGIN ETH_IRQn 1 */
+
+  /* USER CODE END ETH_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */
