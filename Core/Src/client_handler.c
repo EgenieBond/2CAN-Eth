@@ -3,6 +3,18 @@
  *
  *  Created on: Mar 6, 2026
  *      Author: Egenie
+ *
+ *  Обновлено: поддержка нескольких одновременных клиентов (MAX_CLIENTS
+ *  из app_queues.h). Все буферы (входная строка, RX-кольцо, TX-пачка)
+ *  теперь массив слотов -- по одному на клиента, вместо единственного
+ *  глобального набора. client_id -- индекс слота, выделяется в
+ *  raw_tcp_server.c и передаётся сюда во всех вызовах.
+ *
+ *  core_to_eth_queue -- ОБЩАЯ очередь ответов на всех клиентов сразу
+ *  (каждый eth_resp_msg_t несёт свой client_id). Поэтому ClientHandler_PollTx()
+ *  разбирает её целиком за один проход и раскладывает сообщения по
+ *  персональным TX-буферам клиентов -- в отличие от предыдущей версии,
+ *  где один клиент просто вычитывал из очереди свою же пачку.
  */
 
 #include "client_handler.h"
@@ -18,89 +30,100 @@
 #define CLIENT_RX_BUFFER_SIZE        128
 
 /*
- * Внутренний RX ring buffer для готовых SLCAN-команд.
- *
- * Зачем нужен:
- * TCP может быстро прислать сразу 1000/5000/10000 команд.
- * Маленькая eth_to_core_queue не успевает их принять.
- * Поэтому сначала складываем команды сюда, а потом ClientHandlerTask
- * постепенно перекладывает их в eth_to_core_queue.
+ * Внутренний RX ring buffer для готовых SLCAN-команд -- теперь на
+ * КАЖДОГО клиента отдельно. 8 КБ x MAX_CLIENTS(4) = 32 КБ суммарно,
+ * ровно столько же, сколько раньше занимал один общий буфер на 32 КБ
+ * (см. расчёт свободной RAM_D1 по .map-файлу: ~65-70 КБ свободно с
+ * запасом, этого более чем достаточно).
  */
-#define CLIENT_RX_CMD_RING_SIZE      (32U * 1024U)
+#define CLIENT_RX_CMD_RING_SIZE      (8U * 1024U)
 
 /*
- * Сколько команд максимум за один цикл перекладываем
- * из внутреннего RX ring в eth_to_core_queue.
+ * Сколько команд максимум за один проход перекладываем из RX ring
+ * ОДНОГО клиента в eth_to_core_queue.
  */
 #define CLIENT_RX_CMD_DRAIN_LIMIT    256
 
 /*
- * Размер одной TCP-пачки ответов.
+ * Размер TX-буфера на одного клиента.
  */
 #define CLIENT_TX_BATCH_SIZE         1024
 
 /*
- * Сколько сообщений максимум склеиваем в одну TCP-пачку.
+ * Сколько сообщений максимум вычитываем из ОБЩЕЙ core_to_eth_queue за
+ * один вызов ClientHandler_PollTx() -- защитный предел (сама очередь
+ * не длиннее CORE_TO_ETH_QUEUE_LEN=256, но запас не помешает).
  */
-#define CLIENT_TX_MAX_MSG_PER_BATCH  256
-
-/*
- * Сколько TCP-пачек максимум отправляем за один вызов ClientHandler_PollTx().
- */
-#define CLIENT_TX_MAX_BATCH_PER_POLL 1
+#define CLIENT_TX_DRAIN_LIMIT        1024
 
 #define CLIENT_USE_FAKE_SOURCE       0
 
 static osThreadId_t clientHandlerTaskHandle = NULL;
 
-static char rx_line_buf[CLIENT_RX_BUFFER_SIZE];
-static size_t rx_line_pos = 0;
-
-/* RX command ring */
-static uint8_t g_rx_cmd_ring[CLIENT_RX_CMD_RING_SIZE];
-static volatile uint32_t g_rx_cmd_head = 0;
-static volatile uint32_t g_rx_cmd_tail = 0;
-
-static eth_cmd_msg_t pending_cmd;
-static uint8_t pending_cmd_valid = 0;
-
-static eth_resp_msg_t pending_resp;
-static uint8_t pending_resp_valid = 0;
-
-static uint32_t dropped_rx_cmd_ring = 0;
-static uint32_t dropped_eth_to_core = 0;
-static uint32_t tcp_send_fail_count = 0;
-
-static uint32_t ClientHandler_RxRingUsed(void)
+typedef struct
 {
-    if (g_rx_cmd_head >= g_rx_cmd_tail)
+    uint8_t  in_use;
+
+    /* --- приём: TCP -> строки -> RX-кольцо -> eth_to_core_queue --- */
+    char     rx_line_buf[CLIENT_RX_BUFFER_SIZE];
+    size_t   rx_line_pos;
+
+    uint8_t           rx_cmd_ring[CLIENT_RX_CMD_RING_SIZE];
+    volatile uint32_t rx_cmd_head;
+    volatile uint32_t rx_cmd_tail;
+
+    eth_cmd_msg_t pending_cmd;
+    uint8_t       pending_cmd_valid;
+
+    /* --- передача: core_to_eth_queue -> TX-буфер -> TCP --- */
+    uint8_t  tx_batch[CLIENT_TX_BATCH_SIZE];
+    size_t   tx_len;
+
+    /* --- диагностика --- */
+    uint32_t dropped_rx_cmd_ring;
+    uint32_t dropped_eth_to_core;
+    uint32_t tcp_send_fail_count;
+} client_slot_t;
+
+static client_slot_t g_clients[MAX_CLIENTS];
+
+/* ===== RX-кольцо конкретного клиента ===== */
+
+static uint32_t ClientHandler_RxRingUsed(uint8_t id)
+{
+    client_slot_t *c = &g_clients[id];
+
+    if (c->rx_cmd_head >= c->rx_cmd_tail)
     {
-        return g_rx_cmd_head - g_rx_cmd_tail;
+        return c->rx_cmd_head - c->rx_cmd_tail;
     }
 
-    return CLIENT_RX_CMD_RING_SIZE - g_rx_cmd_tail + g_rx_cmd_head;
+    return CLIENT_RX_CMD_RING_SIZE - c->rx_cmd_tail + c->rx_cmd_head;
 }
 
-static uint32_t ClientHandler_RxRingFree(void)
+static uint32_t ClientHandler_RxRingFree(uint8_t id)
 {
-    return CLIENT_RX_CMD_RING_SIZE - ClientHandler_RxRingUsed() - 1U;
+    return CLIENT_RX_CMD_RING_SIZE - ClientHandler_RxRingUsed(id) - 1U;
 }
 
-static void ClientHandler_RxRingWriteByte(uint8_t b)
+static void ClientHandler_RxRingWriteByte(uint8_t id, uint8_t b)
 {
-    g_rx_cmd_ring[g_rx_cmd_head] = b;
-    g_rx_cmd_head = (g_rx_cmd_head + 1U) % CLIENT_RX_CMD_RING_SIZE;
+    client_slot_t *c = &g_clients[id];
+    c->rx_cmd_ring[c->rx_cmd_head] = b;
+    c->rx_cmd_head = (c->rx_cmd_head + 1U) % CLIENT_RX_CMD_RING_SIZE;
 }
 
-static uint8_t ClientHandler_RxRingReadByte(void)
+static uint8_t ClientHandler_RxRingReadByte(uint8_t id)
 {
-    uint8_t b = g_rx_cmd_ring[g_rx_cmd_tail];
-    g_rx_cmd_tail = (g_rx_cmd_tail + 1U) % CLIENT_RX_CMD_RING_SIZE;
+    client_slot_t *c = &g_clients[id];
+    uint8_t b = c->rx_cmd_ring[c->rx_cmd_tail];
+    c->rx_cmd_tail = (c->rx_cmd_tail + 1U) % CLIENT_RX_CMD_RING_SIZE;
     return b;
 }
 
-static int ClientHandler_PushCmdToRxRing(const char *cmd)
+static int ClientHandler_PushCmdToRxRing(uint8_t id, const char *cmd)
 {
+    client_slot_t *c = &g_clients[id];
     size_t len;
 
     if (cmd == NULL)
@@ -117,22 +140,22 @@ static int ClientHandler_PushCmdToRxRing(const char *cmd)
 
     /*
      * Кладём команду вместе с завершающим '\0'.
-     * В ring будет: 't' '1' '2' '3' ... '\r' '\0'
      */
     osKernelLock();
 
-    if (ClientHandler_RxRingFree() < (len + 1U))
+    if (ClientHandler_RxRingFree(id) < (len + 1U))
     {
         osKernelUnlock();
 
-        dropped_rx_cmd_ring++;
+        c->dropped_rx_cmd_ring++;
 
-        if ((dropped_rx_cmd_ring % 100U) == 0U)
+        if ((c->dropped_rx_cmd_ring % 100U) == 0U)
         {
-            DebugUART_Print("[CLIENT] RX cmd ring drops=%lu used=%lu free=%lu\r\n",
-                            (unsigned long)dropped_rx_cmd_ring,
-                            (unsigned long)ClientHandler_RxRingUsed(),
-                            (unsigned long)ClientHandler_RxRingFree());
+            DebugUART_Print("[CLIENT] id=%u RX cmd ring drops=%lu used=%lu free=%lu\r\n",
+                            (unsigned)id,
+                            (unsigned long)c->dropped_rx_cmd_ring,
+                            (unsigned long)ClientHandler_RxRingUsed(id),
+                            (unsigned long)ClientHandler_RxRingFree(id));
         }
 
         return -3;
@@ -140,22 +163,23 @@ static int ClientHandler_PushCmdToRxRing(const char *cmd)
 
     for (size_t i = 0; i < len; i++)
     {
-        ClientHandler_RxRingWriteByte((uint8_t)cmd[i]);
+        ClientHandler_RxRingWriteByte(id, (uint8_t)cmd[i]);
     }
 
-    ClientHandler_RxRingWriteByte(0U);
+    ClientHandler_RxRingWriteByte(id, 0U);
 
     osKernelUnlock();
 
     return 0;
 }
 
-static int ClientHandler_PopCmdFromRxRing(eth_cmd_msg_t *out_msg)
+static int ClientHandler_PopCmdFromRxRing(uint8_t id, eth_cmd_msg_t *out_msg)
 {
     uint32_t used;
     uint32_t temp_tail;
     uint32_t count = 0;
     uint8_t found_zero = 0;
+    client_slot_t *c = &g_clients[id];
 
     if (out_msg == NULL)
     {
@@ -163,10 +187,11 @@ static int ClientHandler_PopCmdFromRxRing(eth_cmd_msg_t *out_msg)
     }
 
     memset(out_msg, 0, sizeof(*out_msg));
+    out_msg->client_id = id;
 
     osKernelLock();
 
-    used = ClientHandler_RxRingUsed();
+    used = ClientHandler_RxRingUsed(id);
 
     if (used == 0U)
     {
@@ -176,13 +201,12 @@ static int ClientHandler_PopCmdFromRxRing(eth_cmd_msg_t *out_msg)
 
     /*
      * Сначала проверяем, есть ли в ring целая команда до '\0'.
-     * Если целой команды ещё нет — ничего не вытаскиваем.
      */
-    temp_tail = g_rx_cmd_tail;
+    temp_tail = c->rx_cmd_tail;
 
     for (uint32_t i = 0; i < used; i++)
     {
-        uint8_t b = g_rx_cmd_ring[temp_tail];
+        uint8_t b = c->rx_cmd_ring[temp_tail];
 
         temp_tail = (temp_tail + 1U) % CLIENT_RX_CMD_RING_SIZE;
 
@@ -211,7 +235,7 @@ static int ClientHandler_PopCmdFromRxRing(eth_cmd_msg_t *out_msg)
      */
     for (uint32_t i = 0; i < (ETH_CMD_MAX_LEN - 1U); i++)
     {
-        uint8_t b = ClientHandler_RxRingReadByte();
+        uint8_t b = ClientHandler_RxRingReadByte(id);
 
         if (b == 0U)
         {
@@ -230,8 +254,9 @@ static int ClientHandler_PopCmdFromRxRing(eth_cmd_msg_t *out_msg)
     return 0;
 }
 
-static void ClientHandler_DrainRxCmdsToCore(void)
+static void ClientHandler_DrainRxCmdsToCore(uint8_t id)
 {
+    client_slot_t *c = &g_clients[id];
     uint32_t moved = 0;
 
     for (;;)
@@ -244,14 +269,14 @@ static void ClientHandler_DrainRxCmdsToCore(void)
             break;
         }
 
-        if (pending_cmd_valid)
+        if (c->pending_cmd_valid)
         {
-            msg = pending_cmd;
-            pending_cmd_valid = 0;
+            msg = c->pending_cmd;
+            c->pending_cmd_valid = 0;
         }
         else
         {
-            if (ClientHandler_PopCmdFromRxRing(&msg) != 0)
+            if (ClientHandler_PopCmdFromRxRing(id, &msg) != 0)
             {
                 break;
             }
@@ -261,16 +286,17 @@ static void ClientHandler_DrainRxCmdsToCore(void)
 
         if (st != osOK)
         {
-            pending_cmd = msg;
-            pending_cmd_valid = 1;
+            c->pending_cmd = msg;
+            c->pending_cmd_valid = 1;
 
-            dropped_eth_to_core++;
+            c->dropped_eth_to_core++;
 
-            if ((dropped_eth_to_core % 1000U) == 0U)
+            if ((c->dropped_eth_to_core % 1000U) == 0U)
             {
-                DebugUART_Print("[CLIENT] eth_to_core full count=%lu rx_used=%lu\r\n",
-                                (unsigned long)dropped_eth_to_core,
-                                (unsigned long)ClientHandler_RxRingUsed());
+                DebugUART_Print("[CLIENT] id=%u eth_to_core full count=%lu rx_used=%lu\r\n",
+                                (unsigned)id,
+                                (unsigned long)c->dropped_eth_to_core,
+                                (unsigned long)ClientHandler_RxRingUsed(id));
             }
 
             break;
@@ -280,8 +306,22 @@ static void ClientHandler_DrainRxCmdsToCore(void)
     }
 }
 
-void ClientHandler_InputBytes(const uint8_t *data, size_t len)
+void ClientHandler_InputBytes(uint8_t client_id, const uint8_t *data, size_t len)
 {
+    client_slot_t *c;
+
+    if (client_id >= MAX_CLIENTS)
+    {
+        return;
+    }
+
+    c = &g_clients[client_id];
+
+    if (!c->in_use)
+    {
+        return;   /* байты от уже отключённого/несуществующего клиента -- игнор */
+    }
+
     if (data == NULL)
     {
         return;
@@ -291,135 +331,186 @@ void ClientHandler_InputBytes(const uint8_t *data, size_t len)
     {
         uint8_t b = data[i];
 
-        if (rx_line_pos < (CLIENT_RX_BUFFER_SIZE - 1U))
+        if (c->rx_line_pos < (CLIENT_RX_BUFFER_SIZE - 1U))
         {
-            rx_line_buf[rx_line_pos++] = (char)b;
+            c->rx_line_buf[c->rx_line_pos++] = (char)b;
         }
         else
         {
-            rx_line_pos = 0;
+            c->rx_line_pos = 0;
             continue;
         }
 
         if (b == '\r')
         {
-            rx_line_buf[rx_line_pos] = '\0';
+            c->rx_line_buf[c->rx_line_pos] = '\0';
 
-            /*
-             * Теперь не кладём сразу в eth_to_core_queue.
-             * Сначала кладём во внутренний RX ring buffer.
-             */
-            (void)ClientHandler_PushCmdToRxRing(rx_line_buf);
+            (void)ClientHandler_PushCmdToRxRing(client_id, c->rx_line_buf);
 
-            rx_line_pos = 0;
+            c->rx_line_pos = 0;
         }
     }
 }
 
-static uint8_t ClientHandler_BuildTxBatch(uint8_t *tx_batch,
-                                          size_t tx_batch_size,
-                                          size_t *out_len)
+/*
+ * Разгружает core_to_eth_queue целиком за один проход, раскладывая
+ * каждый ответ по client_id в персональный TX-буфер соответствующего
+ * клиента. В конце сбрасывает (send) все непустые буферы.
+ */
+void ClientHandler_PollTx(void)
 {
-    size_t tx_len = 0;
-    uint32_t msg_count = 0;
-
-    if ((tx_batch == NULL) || (out_len == NULL) || (tx_batch_size == 0U))
-    {
-        return 0;
-    }
-
-    *out_len = 0;
+    uint32_t drained = 0;
 
     for (;;)
     {
         eth_resp_msg_t resp;
         osStatus_t st;
         size_t resp_len;
+        client_slot_t *c;
 
-        if (msg_count >= CLIENT_TX_MAX_MSG_PER_BATCH)
+        if (drained >= CLIENT_TX_DRAIN_LIMIT)
         {
             break;
         }
 
-        if (pending_resp_valid)
+        st = osMessageQueueGet(core_to_eth_queue, &resp, NULL, 0);
+        if (st != osOK)
         {
-            resp = pending_resp;
-            pending_resp_valid = 0;
+            break;   /* очередь пуста */
         }
-        else
-        {
-            st = osMessageQueueGet(core_to_eth_queue, &resp, NULL, 0);
 
-            if (st != osOK)
-            {
-                break;
-            }
+        drained++;
+
+        if (resp.client_id >= MAX_CLIENTS)
+        {
+            continue;   /* некорректный id -- пропускаем */
+        }
+
+        c = &g_clients[resp.client_id];
+
+        if (!c->in_use)
+        {
+            continue;   /* клиент уже отключился -- ответ адресату не доставить, пропускаем */
         }
 
         resp_len = strlen(resp.data);
-
         if (resp_len == 0U)
         {
             continue;
         }
 
-        if ((tx_len + resp_len) > tx_batch_size)
+        if ((c->tx_len + resp_len) > CLIENT_TX_BATCH_SIZE)
         {
-            pending_resp = resp;
-            pending_resp_valid = 1;
-            break;
+            /* буфер этого клиента переполнился бы -- сбрасываем то, что уже накопили */
+#if CLIENT_USE_FAKE_SOURCE
+            DebugUART_Print("[CLIENT] id=%u TX->FAKE_CLIENT batch len=%u\r\n",
+                            (unsigned)resp.client_id, (unsigned)c->tx_len);
+            c->tx_len = 0;
+#else
+            if (RawTcpServer_HasClient(resp.client_id))
+            {
+                int send_rc = RawTcpServer_SendAsync(resp.client_id, c->tx_batch, c->tx_len);
+                if (send_rc != 0)
+                {
+                    c->tcp_send_fail_count++;
+                    if ((c->tcp_send_fail_count % 100U) == 0U)
+                    {
+                        DebugUART_Print("[CLIENT] id=%u TCP send fails=%lu last_rc=%d\r\n",
+                                        (unsigned)resp.client_id,
+                                        (unsigned long)c->tcp_send_fail_count,
+                                        send_rc);
+                    }
+                }
+            }
+            c->tx_len = 0;
+#endif
         }
 
-        memcpy(&tx_batch[tx_len], resp.data, resp_len);
-        tx_len += resp_len;
-        msg_count++;
+        memcpy(&c->tx_batch[c->tx_len], resp.data, resp_len);
+        c->tx_len += resp_len;
     }
 
-    *out_len = tx_len;
-
-    return (tx_len > 0U) ? 1U : 0U;
-}
-
-void ClientHandler_PollTx(void)
-{
-    uint8_t tx_batch[CLIENT_TX_BATCH_SIZE];
-
-    for (uint32_t batch_i = 0; batch_i < CLIENT_TX_MAX_BATCH_PER_POLL; batch_i++)
+    /* финальный сброс всех непустых буферов */
+    for (uint8_t id = 0; id < MAX_CLIENTS; id++)
     {
-        size_t tx_len = 0;
+        client_slot_t *c = &g_clients[id];
 
-        if (!ClientHandler_BuildTxBatch(tx_batch, sizeof(tx_batch), &tx_len))
+        if ((c->tx_len == 0U) || (!c->in_use))
         {
-            return;
+            continue;
         }
 
 #if CLIENT_USE_FAKE_SOURCE
-        DebugUART_Print("[CLIENT] TX->FAKE_CLIENT batch len=%u\r\n",
-                        (unsigned)tx_len);
+        DebugUART_Print("[CLIENT] id=%u TX->FAKE_CLIENT batch len=%u\r\n",
+                        (unsigned)id, (unsigned)c->tx_len);
+        c->tx_len = 0;
 #else
-        if (!RawTcpServer_HasClient())
+        if (RawTcpServer_HasClient(id))
         {
-            return;
-        }
-
-        int send_rc = RawTcpServer_SendAsync(tx_batch, tx_len);
-
-        if (send_rc != 0)
-        {
-            tcp_send_fail_count++;
-
-            if ((tcp_send_fail_count % 100U) == 0U)
+            int send_rc = RawTcpServer_SendAsync(id, c->tx_batch, c->tx_len);
+            if (send_rc != 0)
             {
-                DebugUART_Print("[CLIENT] TCP send fails=%lu last_rc=%d len=%u\r\n",
-                                (unsigned long)tcp_send_fail_count,
-                                send_rc,
-                                (unsigned)tx_len);
+                c->tcp_send_fail_count++;
+                if ((c->tcp_send_fail_count % 100U) == 0U)
+                {
+                    DebugUART_Print("[CLIENT] id=%u TCP send fails=%lu last_rc=%d\r\n",
+                                    (unsigned)id,
+                                    (unsigned long)c->tcp_send_fail_count,
+                                    send_rc);
+                }
             }
-
-            return;
         }
+        c->tx_len = 0;
 #endif
     }
+}
+
+void ClientHandler_ClientConnected(uint8_t client_id)
+{
+    client_slot_t *c;
+
+    if (client_id >= MAX_CLIENTS)
+    {
+        return;
+    }
+
+    c = &g_clients[client_id];
+
+    osKernelLock();
+    c->rx_cmd_head = 0;
+    c->rx_cmd_tail = 0;
+    osKernelUnlock();
+
+    c->rx_line_pos       = 0;
+    c->pending_cmd_valid = 0;
+    c->tx_len            = 0;
+    c->in_use            = 1;
+
+    DebugUART_Print("[CLIENT] id=%u connected, slot reset\r\n", (unsigned)client_id);
+}
+
+void ClientHandler_ClientDisconnected(uint8_t client_id)
+{
+    client_slot_t *c;
+
+    if (client_id >= MAX_CLIENTS)
+    {
+        return;
+    }
+
+    c = &g_clients[client_id];
+
+    osKernelLock();
+    c->rx_cmd_head = 0;
+    c->rx_cmd_tail = 0;
+    osKernelUnlock();
+
+    c->rx_line_pos       = 0;
+    c->pending_cmd_valid = 0;
+    c->tx_len            = 0;
+    c->in_use            = 0;
+
+    DebugUART_Print("[CLIENT] id=%u disconnected, slot freed\r\n", (unsigned)client_id);
 }
 
 static void ClientHandlerTask(void *argument)
@@ -427,8 +518,9 @@ static void ClientHandlerTask(void *argument)
     (void)argument;
 
     DebugUART_Print("[CLIENT] ClientHandlerTask started\r\n");
-    DebugUART_Print("[CLIENT] RX cmd ring size=%lu bytes\r\n",
-                    (unsigned long)CLIENT_RX_CMD_RING_SIZE);
+    DebugUART_Print("[CLIENT] RX cmd ring size per client=%lu bytes, MAX_CLIENTS=%u\r\n",
+                    (unsigned long)CLIENT_RX_CMD_RING_SIZE,
+                    (unsigned)MAX_CLIENTS);
 
 #if CLIENT_USE_FAKE_SOURCE
     FakeClientSource_Init();
@@ -441,12 +533,29 @@ static void ClientHandlerTask(void *argument)
 #endif
 
         /*
-         * Сначала разгружаем входной ring в Core.
+         * Разгружаем входной ring каждого ЗАНЯТОГО клиента -- повторяем,
+         * пока реально что-то удаётся сдвинуть, а не один раз за проход.
          */
-        ClientHandler_DrainRxCmdsToCore();
+        for (uint8_t id = 0; id < MAX_CLIENTS; id++)
+        {
+            if (!g_clients[id].in_use)
+            {
+                continue;
+            }
+
+            for (uint32_t pass = 0; pass < 64U; pass++)
+            {
+                uint32_t before = ClientHandler_RxRingUsed(id);
+                ClientHandler_DrainRxCmdsToCore(id);
+                if (ClientHandler_RxRingUsed(id) == before)
+                {
+                    break;
+                }
+            }
+        }
 
         /*
-         * Потом забираем ответы Core -> TCP.
+         * Разбираем общую очередь ответов и рассылаем каждому клиенту его часть.
          */
         ClientHandler_PollTx();
 

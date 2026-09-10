@@ -42,9 +42,7 @@
 
 extern struct netif gnetif;
 void invalidate_dcache_range(void *addr, uint32_t size);
-//static void EthTxTask(void *argument);
 static uint8_t g_MACAddr[6] = {0x00,0x80,0xE1,0x00,0x00,0x00};
-//osEventFlagsId_t g_ethLinkEvt = NULL;
 
 /* USER CODE END 0 */
 
@@ -110,7 +108,7 @@ typedef struct __attribute__((aligned(32)))
 } RxBuff_t;
 
 /* Memory Pool Declaration */
-#define ETH_RX_BUFFER_CNT             16U     //16U было
+#define ETH_RX_BUFFER_CNT             13U
 LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX PBUF pool");
 
 /* Variable Definitions */
@@ -179,16 +177,13 @@ lan8742_IOCtx_t  LAN8742_IOCtx = {ETH_PHY_IO_Init,
 #include "lwip/netif.h"
 
 static err_t low_level_output(struct netif *netif, struct pbuf *p);
-/* ===== DEBUG/SAFE TX PATH =====
- * ВРЕМЕННО:
- * кладём TX-буфер в обычную RAM, без специальных секций.
- * D-Cache у нас сейчас отключён, поэтому для отладки это безопасно.
 
-static uint8_t g_TxFrame[1536] __attribute__((aligned(32)));
-static ETH_BufferTypeDef g_TxBuffer __attribute__((aligned(32)));
- */
-
-#define ETH_TX_POOL_SIZE  4U    //4u было
+#define ETH_TX_POOL_SIZE  6U    /* ДОЛЖНО совпадать с ETH_TX_DESC_CNT в
+                                    stm32h7xx_hal_conf.h — это фиксированный
+                                    размер аппаратного кольца TX-дескрипторов
+                                    HAL, наращивать программный пул сверх
+                                    этого числа нельзя: HAL начнёт отклонять
+                                    HAL_ETH_Transmit_IT() с ошибкой BUSY/DMA */
 
 typedef struct
 {
@@ -202,7 +197,6 @@ static EthTxSlot_t g_TxPool[ETH_TX_POOL_SIZE]
 
 static volatile uint32_t g_TxPoolHead = 0;
 static osThreadId_t       g_TxTaskHandle  = NULL;
-static osMessageQueueId_t g_TxQueue       = NULL;
 static void EthTxTask(void *argument);  /* forward declaration */
 
 /* ===== Глобальные счетчики ===== */
@@ -280,33 +274,13 @@ static void netif_link_up_in_tcpip(void *arg)
     return;
   }
 
-  DebugUART_Print("[ETH] netif_link_up_in_tcpip ENTER flags_before=0x%02X\r\n",
-                  (unsigned)netif->flags);
-
   netif_set_link_up(netif);
   netif_set_up(netif);
-
-  DebugUART_Print("[ETH] tcpip: netif link UP + netif UP\r\n");
-  DebugUART_Print("[ETH] tcpip: flags_after=0x%02X\r\n", (unsigned)netif->flags);
-  DebugUART_Print("[ETH] tcpip: input=%p output=%p linkoutput=%p\r\n",
-                  (void *)netif->input,
-                  (void *)netif->output,
-                  (void *)netif->linkoutput);
-  DebugUART_Print("[ETH] tcpip: hwaddr=%02X:%02X:%02X:%02X:%02X:%02X\r\n",
-                  netif->hwaddr[0], netif->hwaddr[1], netif->hwaddr[2],
-                  netif->hwaddr[3], netif->hwaddr[4], netif->hwaddr[5]);
-  DebugUART_Print("[ETH] tcpip: ip=%d.%d.%d.%d\r\n",
-                  ip4_addr1(netif_ip4_addr(netif)),
-                  ip4_addr2(netif_ip4_addr(netif)),
-                  ip4_addr3(netif_ip4_addr(netif)),
-                  ip4_addr4(netif_ip4_addr(netif)));
 
   if (g_ethLinkEvt)
   {
     osEventFlagsSet(g_ethLinkEvt, APP_ETH_EVT_LINK_UP);
   }
-
-  DebugUART_Print("[ETH] netif_link_up_in_tcpip EXIT\r\n");
 }
 
 static void netif_link_down_in_tcpip(void *arg)
@@ -319,21 +293,13 @@ static void netif_link_down_in_tcpip(void *arg)
     return;
   }
 
-  DebugUART_Print("[ETH] netif_link_down_in_tcpip ENTER flags_before=0x%02X\r\n",
-                  (unsigned)netif->flags);
-
   netif_set_link_down(netif);
   netif_set_down(netif);
-
-  DebugUART_Print("[ETH] tcpip: netif link DOWN + netif DOWN\r\n");
-  DebugUART_Print("[ETH] tcpip: flags_after=0x%02X\r\n", (unsigned)netif->flags);
 
   if (g_ethLinkEvt)
   {
     osEventFlagsClear(g_ethLinkEvt, APP_ETH_EVT_LINK_UP);
   }
-
-  DebugUART_Print("[ETH] netif_link_down_in_tcpip EXIT\r\n");
 }
 
 static void Debug_PrintPhyRegs(void)
@@ -671,6 +637,45 @@ static void dump_arp_packet(const struct pbuf *p, struct netif *netif)
                   ip4_addr4(netif_ip4_addr(netif)));
 }
 
+/* ===== Поддержка теста loopback (eth_loopback_test.c) ===== */
+extern volatile uint8_t g_eth_loopback_active;
+extern void EthLoopback_OnFrameReceived(uint16_t payload_len);
+
+#define ETH_LOOPBACK_ETHERTYPE_CHECK   0x88B5U
+
+/*
+ * EthLoopback_SendRawFrame() — публичная обёртка для теста loopback.
+ * Строит сырой Ethernet-кадр (dst=broadcast, src=свой MAC, заданный
+ * EtherType + payload) и отправляет его через тот же самый TX-путь,
+ * функцию low_level_output()
+ */
+err_t EthLoopback_SendRawFrame(struct netif *netif,
+                               uint16_t ethertype,
+                               const uint8_t *payload,
+                               uint16_t payload_len)
+{
+    struct pbuf *p;
+    uint8_t *buf;
+
+    if ((netif == NULL) || (payload == NULL)) { return ERR_ARG; }
+
+    p = pbuf_alloc(PBUF_RAW, (u16_t)(14U + payload_len), PBUF_RAM);
+    if (p == NULL) { return ERR_MEM; }
+
+    buf = (uint8_t *)p->payload;
+
+    memset(&buf[0], 0xFF, 6);
+    memcpy(&buf[6], netif->hwaddr, 6);
+    buf[12] = (uint8_t)(ethertype >> 8);
+    buf[13] = (uint8_t)(ethertype & 0xFFU);
+    memcpy(&buf[14], payload, payload_len);
+
+    err_t result = low_level_output(netif, p);
+
+    pbuf_free(p);
+    return result;
+}
+
 /* USER CODE END 3 */
 
 /* Private functions ---------------------------------------------------------*/
@@ -715,27 +720,7 @@ void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
   g_eth_dma_last_error = dma_err;
   g_eth_hal_last_error = HAL_ETH_GetError(handlerEth);
 
-  /* НЕ печатаем здесь: HAL_ETH_ErrorCallback вызывается из контекста
-     прерывания, а DebugUART_Print блокирующий — печать тут стопорит
-     всю систему на несколько мс на каждую ошибку и провоцирует ещё
-     больше ошибок. Детали смотри через ETH_DebugPrintCounters() из
-     обычной задачи, счётчики g_eth_dma_last_error/g_eth_hal_last_error
-     уже сохранены выше. */
-
-  /* КРИТИЧНО: TxPktSemaphore освобождаем ТОЛЬКО при TBU (реальной
-     TX-проблеме), а не безусловно при любой ошибке. RBU — это ошибка
-     приёма, не имеющая отношения к передаче. Безусловный release тут
-     "накачивал" TX-семафор лишними кредитами на каждый RBU (а RBU
-     случается постоянно под нагрузкой), и EthTxTask мог забрать
-     "чужой" кредит и вызвать HAL_ETH_ReleaseTxPacket() для слота,
-     который на самом деле ещё передаётся — портя данные в полёте и
-     ломая внутреннее состояние TX-дескрипторов HAL, вплоть до полной
-     остановки ETH DMA. Именно это было причиной случайных мгновенных
-     зависаний. */
-  if ((dma_err & ETH_DMACSR_TBU) == ETH_DMACSR_TBU)
-  {
-    osSemaphoreRelease(TxPktSemaphore);
-  }
+  osSemaphoreRelease(TxPktSemaphore);
 
   if ((dma_err & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
   {
@@ -775,13 +760,29 @@ static void low_level_init(struct netif *netif)
   heth.Init.RxDesc = DMARxDscrTab;
   heth.Init.RxBuffLen = 1536;
 
-  LWIP_PLATFORM_DIAG(("[ETH] MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
-                      g_MACAddr[0], g_MACAddr[1], g_MACAddr[2],
-                      g_MACAddr[3], g_MACAddr[4], g_MACAddr[5]));
-
   hal_eth_init_status = HAL_ETH_Init(&heth);
 
-  memset(&TxConfig, 0, sizeof(TxConfig));
+  /*
+     * Тюнинг арбитража шины DMA — не настраивается HAL_ETH_Init()
+     * автоматически, остаётся в состоянии после сброса.
+     *
+     * DMAMR.DA = 1: круговой (round-robin) арбитраж между RX и TX DMA
+     * каналами вместо фиксированного приоритета — даёт каждому каналу
+     * честный, предсказуемый доступ к шине AHB при одновременной
+     * работе, вместо того чтобы один канал мог "голодать" или
+     * конфликтовать с другим за доступ на высокой частоте.
+     *
+     * DMASBMR: ограничиваем число одновременных ("outstanding")
+     * запросов к шине (RD_OSR/WR_OSR) до минимума и включаем Fixed
+     * Burst — снижает риск столкновения запросов на арбитраже шины
+     * при высокой частоте HCLK (400 МГц), ценой небольшого снижения
+     * теоретического пика пропускной способности отдельного канала.
+     */
+    ETH->DMAMR |= ETH_DMAMR_DA;
+    ETH->DMASBMR |= ETH_DMASBMR_FB;                     /* Fixed Burst вместо Mixed */
+
+    memset(&TxConfig, 0, sizeof(TxConfig));
+
   TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
   TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
   TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
@@ -790,46 +791,11 @@ static void low_level_init(struct netif *netif)
   LWIP_MEMPOOL_INIT(RX_POOL);
 
   /* Инициализируем TX пул */
-    for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
-    {
-        g_TxPool[i].busy = 0;
-    }
-    g_TxPoolHead = 0;
-    DebugUART_Print("[ETH] TX pool initialized, slots=%u\r\n",
-                    (unsigned)ETH_TX_POOL_SIZE);
-
-    /* Очередь и фоновая задача для асинхронного освобождения TX-слотов.
-       Без неё low_level_output() блокирует tcpip_thread до завершения
-       каждой передачи, а пока он заблокирован — не может забирать
-       кадры из RX-дескрипторов, из-за чего DMA сообщает RBU. */
-    g_TxQueue = osMessageQueueNew(ETH_TX_POOL_SIZE, sizeof(EthTxSlot_t *), NULL);
-    if (g_TxQueue == NULL)
-    {
-      DebugUART_Print("[ETH] ERROR: TxQueue creation failed\r\n");
-    }
-
-    {
-        osThreadAttr_t txAttr;
-        memset(&txAttr, 0, sizeof(txAttr));
-        txAttr.name       = "EthTx";
-        txAttr.stack_size = 2048;
-        /* Выше tcpip_thread/EthIf: эта задача почти всегда спит на
-           семафоре и делает минимум работы при пробуждении (проверка +
-           HAL_ETH_ReleaseTxPacket), поэтому не отнимает заметное время у
-           остальных, зато быстро освобождает TX-слоты и не даёт очереди
-           g_TxQueue переполняться. */
-        txAttr.priority   = (osPriority_t)osPriorityHigh;
-        g_TxTaskHandle = osThreadNew(EthTxTask, NULL, &txAttr);
-    }
-
-    if (g_TxTaskHandle == NULL)
-    {
-      DebugUART_Print("[ETH] ERROR: EthTxTask creation failed\r\n");
-    }
-    else
-    {
-      DebugUART_Print("[ETH] EthTxTask created\r\n");
-    }
+  for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
+  {
+      g_TxPool[i].busy = 0;
+  }
+  g_TxPoolHead = 0;
 
 #if LWIP_ARP || LWIP_ETHERNET
 
@@ -844,35 +810,49 @@ static void low_level_init(struct netif *netif)
 #endif
 
   RxPktSemaphore = osSemaphoreNew(1, 0, NULL);
-  TxPktSemaphore = osSemaphoreNew(ETH_TX_POOL_SIZE, 0, NULL);
+  TxPktSemaphore = osSemaphoreNew(1, 0, NULL);
 
   if (g_ethLinkEvt == NULL)
   {
     g_ethLinkEvt = osEventFlagsNew(NULL);
-    LWIP_PLATFORM_DIAG(("[EVT] g_ethLinkEvt created = %p\r\n", (void*)g_ethLinkEvt));
-  }
-  else
-  {
-    LWIP_PLATFORM_DIAG(("[EVT] g_ethLinkEvt already  = %p\r\n", (void*)g_ethLinkEvt));
   }
 
-  LWIP_PLATFORM_DIAG(("[EVT] mask APP_ETH_EVT_LINK_UP=0x%08lX\r\n",
-                      (unsigned long)APP_ETH_EVT_LINK_UP));
+  /*
+   * Асинхронная TX-задача: освобождает слоты TX-пула по мере
+   * завершения передачи DMA (через TxPktSemaphore, отпускаемый в
+   * HAL_ETH_TxCpltCallback / HAL_ETH_ErrorCallback). Запускается
+   * ДО low_level_output(), чтобы к моменту первой передачи задача
+   * уже ждала на семафоре.
+   */
+  memset(&attributes, 0, sizeof(attributes));
+  attributes.name = "EthTx";
+  attributes.stack_size = 1024;
+  attributes.priority = osPriorityAboveNormal;
+  g_TxTaskHandle = osThreadNew(EthTxTask, NULL, &attributes);
+
+  if (g_TxTaskHandle == NULL)
+  {
+    DebugUART_Print("[ETH] ERROR: EthTxTask creation failed\r\n");
+    Error_Handler();
+  }
 
   memset(&attributes, 0, sizeof(attributes));
-    attributes.name = "EthIf";
-    attributes.stack_size = 4096;
-    /* ВАЖНО: приоритет должен быть НЕ выше, чем TCPIP_THREAD_PRIO
-       (AboveNormal, см. lwipopts.h). Если поднять EthIf выше — он
-       вытесняет tcpip_thread на каждый входящий кадр, а именно
-       tcpip_thread освобождает буферы RX_POOL через pbuf_free() после
-       разбора TCP-сегмента. При приоритете EthIf > tcpip_thread буферы
-       расходуются быстрее, чем освобождаются — пул прогрессирующе
-       истощается, и скорость падает со временем (проверено на практике:
-       именно это происходило при osPriorityHigh). Равный приоритет даёт
-       честный round-robin между приёмом и обработкой. */
-    attributes.priority = osPriorityAboveNormal;
-    osThreadNew(ethernetif_input, netif, &attributes);
+  attributes.name = "EthIf";
+  attributes.stack_size = 4096;
+  //attributes.priority = osPriorityAboveNormal;
+  attributes.priority = osPriorityHigh;    /* было osPriorityAboveNormal --
+                                              EthIf освобождает RX-буферы
+                                              (RX_POOL) через pbuf_free_custom,
+                                              и при равном приоритете с
+                                              tcpip_thread под TCP-нагрузкой
+                                              не успевала вовремя забирать
+                                              принятые кадры из DMA, из-за
+                                              чего пул истощался и DMA терял
+                                              новые кадры (RBU). Повышенный
+                                              приоритет даёт этой задаче
+                                              гарантированный доступ к CPU
+                                              для дренажа RX-пула. */
+  osThreadNew(ethernetif_input, netif, &attributes);
 
   LAN8742_RegisterBusIO(&LAN8742, &LAN8742_IOCtx);
 
@@ -888,11 +868,7 @@ static void low_level_init(struct netif *netif)
     Error_Handler();
   }
 
-  Debug_PrintPhyRegs();
-
   PHYLinkState = LAN8742_GetLinkState(&LAN8742);
-  DebugUART_Print("[ETH] PHYLinkState(initial)=%ld\r\n", (long)PHYLinkState);
-  Debug_PrintPhyRegs();
 
   if (PHYLinkState > LAN8742_STATUS_LINK_DOWN)
   {
@@ -924,17 +900,7 @@ static void low_level_init(struct netif *netif)
     MACConf.DuplexMode = duplex;
     MACConf.Speed      = speed;
     HAL_ETH_SetMACConfig(&heth, &MACConf);
-
-    DebugUART_Print("[MAC] Preconfig only: Speed=%s Duplex=%s\r\n",
-                    (MACConf.Speed == ETH_SPEED_100M) ? "100M" : "10M",
-                    (MACConf.DuplexMode == ETH_FULLDUPLEX_MODE) ? "FULL" : "HALF");
   }
-  else
-  {
-    DebugUART_Print("[ETH] initial PHY link DOWN\r\n");
-  }
-
-  DebugUART_Print("[ETH] low_level_init done, waiting for ethernet_link_thread to control link state\r\n");
 
 #endif /* LWIP_ARP || LWIP_ETHERNET */
 }
@@ -943,32 +909,24 @@ static void EthTxTask(void *argument)
 {
     LWIP_UNUSED_ARG(argument);
 
-    EthTxSlot_t *slot = NULL;
-
     for (;;)
     {
-        if (osMessageQueueGet(g_TxQueue, &slot, NULL, osWaitForever) != osOK)
+        /*
+         * Блокируемся здесь, в отдельной задаче, а НЕ в tcpip_thread.
+         * Семафор освобождается в HAL_ETH_TxCpltCallback() (ISR) при
+         * каждом завершении передачи одного или нескольких кадров.
+         */
+        if (osSemaphoreAcquire(TxPktSemaphore, osWaitForever) != osOK)
         {
             continue;
         }
 
-        if (slot == NULL)
-        {
-            continue;
-        }
-
-        if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
-        {
-            g_tx_timeout_cnt++;
-        }
-
-        /* Даже при таймауте пробуем освободить пакет в HAL — иначе
-           внутренний TX-дескриптор может остаться помеченным как
-           занятый навсегда, что рано или поздно застопорит все
-           последующие передачи. */
+        /*
+         * Проходит по завершённым TX-дескрипторам и для каждого
+         * вызывает HAL_ETH_TxFreeCallback(buff) -> освобождает
+         * соответствующий слот.
+         */
         HAL_ETH_ReleaseTxPacket(&heth);
-
-        slot->busy = 0;
     }
 }
 
@@ -995,6 +953,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     HAL_StatusTypeDef st;
     EthTxSlot_t *slot  = NULL;
     uint32_t slot_idx  = 0;
+    ETH_TxPacketConfig txCfg;
 
     LWIP_UNUSED_ARG(netif);
 
@@ -1017,11 +976,9 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
         return ERR_IF;
     }
 
-    /* Ищем свободный слот. НЕ блокируемся, если все заняты — просто
-       сообщаем lwIP ERR_MEM. Блокировка здесь недопустима: этот код
-       выполняется в tcpip_thread, и если он зависнет в ожидании TX,
-       он не сможет обрабатывать RX, что переполняет аппаратные
-       RX-дескрипторы и вызывает ошибки DMA (RBU). */
+    /* Ищем свободный слот. Слоты освобождаются асинхронно в
+     * EthTxTask -- эта функция больше НИКОГДА не ждёт завершения
+     * реальной передачи по шине. */
     slot = NULL;
     for (uint32_t i = 0; i < ETH_TX_POOL_SIZE; i++)
     {
@@ -1035,6 +992,12 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
 
     if (slot == NULL)
     {
+        /*
+         * Все слоты заняты передачей -- при 4 слотах и микросекундном
+         * времени передачи кадра на 100 Мбит это редкий случай.
+         * НЕ блокируем tcpip_thread: отдаём пакет обратно lwIP,
+         * следующий tcp_output()/таймер повторит попытку сам.
+         */
         g_tx_submit_fail_cnt++;
 #if ETH_PAD_SIZE
         pbuf_header(p, ETH_PAD_SIZE);
@@ -1042,7 +1005,6 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
         return ERR_MEM;
     }
 
-    /* Копируем данные */
     memset(slot->frame, 0, sizeof(slot->frame));
 
     if (pbuf_copy_partial(p, slot->frame, frame_len, 0) != frame_len)
@@ -1061,12 +1023,18 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     slot->desc.len    = tx_len;
     slot->desc.next   = NULL;
 
-    TxConfig.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
-    TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
-    TxConfig.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
-    TxConfig.Length       = tx_len;
-    TxConfig.TxBuffer     = &slot->desc;
-    TxConfig.pData        = NULL;
+    memset(&txCfg, 0, sizeof(txCfg));
+    txCfg.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
+    txCfg.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
+    txCfg.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
+    txCfg.Length       = tx_len;
+    txCfg.TxBuffer     = &slot->desc;
+    /*
+     * pData = адрес slot->frame. HAL вернёт этот же адрес в
+     * HAL_ETH_TxFreeCallback() при освобождении -- по нему мы
+     * узнаём, какой именно слот освободился.
+     */
+    txCfg.pData        = slot->frame;
 
     __DMB();
     __DSB();
@@ -1075,7 +1043,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     slot->busy = 1;
     g_TxPoolHead = (g_TxPoolHead + 1U) % ETH_TX_POOL_SIZE;
 
-    st = HAL_ETH_Transmit_IT(&heth, &TxConfig);
+    st = HAL_ETH_Transmit_IT(&heth, &txCfg);
 
     if (st != HAL_OK)
     {
@@ -1094,21 +1062,12 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
 
     g_tx_submit_ok_cnt++;
 
-    /* НЕ ждём завершения здесь. Передаём слот в EthTxTask — она сама
-       дождётся аппаратного завершения и освободит слот, а tcpip_thread
-       немедленно вернётся к обработке приёма. */
-    if (osMessageQueuePut(g_TxQueue, &slot, 0, 0) != osOK)
-    {
-        /* Не должно происходить (очередь размером с пул), но на
-           всякий случай — освобождаем инлайново, чтобы не потерять
-           слот навсегда. */
-        DebugUART_Print("[ETH] TX queue full, freeing slot inline\r\n");
-        if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) == osOK)
-        {
-            HAL_ETH_ReleaseTxPacket(&heth);
-        }
-        slot->busy = 0;
-    }
+    /*
+     * Больше НЕ ждём здесь завершения DMA. Кадр уже скопирован в
+     * slot->frame, поэтому lwIP безопасно освобождает свой pbuf
+     * сразу после возврата отсюда. Реальное освобождение слота
+     * (busy=0) происходит асинхронно в EthTxTask.
+     */
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE);
@@ -1159,46 +1118,81 @@ static struct pbuf * low_level_input(struct netif *netif)
  *
  * @param netif the lwip network interface structure for this ethernetif
  */
-void ethernetif_input(void *argument)
+void ethernetif_input(void* argument)
 {
   struct pbuf *p = NULL;
-  struct netif *netif = (struct netif *) argument;
+  struct netif *netif = (struct netif *)argument;
 
-  for(;;)
+  for (;;)
   {
     if (osSemaphoreAcquire(RxPktSemaphore, TIME_WAITING_FOR_INPUT) == osOK)
     {
-      if (RxAllocStatus == RX_ALLOC_ERROR)
-      {
-        continue;
-      }
+      g_rx_sem_cnt++;
 
       do
       {
         p = low_level_input(netif);
-
         if (p != NULL)
         {
-          if (netif->input(p, netif) != ERR_OK)
+          /* Перехват кадров теста loopback: если тест активен и у кадра
+           * наш опознавательный EtherType — не отдаём его в lwIP-стек
+           * (он его всё равно не распознает и просто отбросит), а сразу
+           * засчитываем в счётчики теста. На обычную работу (флаг=0)
+           * это не влияет — одна лёгкая проверка на кадр. */
+          uint8_t skip_lwip_input = 0;
+
+          if (g_eth_loopback_active && (p->tot_len >= (ETH_PAD_SIZE + 14U)))
           {
-            pbuf_free(p);
+            uint8_t hdr[14];
+            if (pbuf_copy_partial(p, hdr, sizeof(hdr), ETH_PAD_SIZE) == sizeof(hdr))
+            {
+              uint16_t ethertype = (uint16_t)((hdr[12] << 8) | hdr[13]);
+              if (ethertype == ETH_LOOPBACK_ETHERTYPE_CHECK)
+              {
+                uint16_t payload_len = (uint16_t)(p->tot_len - ETH_PAD_SIZE - 14U);
+                EthLoopback_OnFrameReceived(payload_len);
+                pbuf_free(p);
+                skip_lwip_input = 1;
+              }
+              else
+              {
+                /* Диагностика: пока тест loopback активен, любой кадр,
+                 * НЕ совпавший с нашим EtherType, -- подозрительный, раз
+                 * никакого внешнего трафика в этот момент быть не должно
+                 * (кабель не подключён). Печатаем, что это было, чтобы
+                 * понять природу "неучтённых" RX-прерываний. Ограничиваем
+                 * число выводов, чтобы не затопить UART. */
+                static uint32_t unmatched_dump_cnt = 0;
+                if (unmatched_dump_cnt < 20U)
+                {
+                  unmatched_dump_cnt++;
+                  DebugUART_Print("[LOOPBACK-RX?] #%lu unmatched frame: "
+                                  "dst=%02X:%02X:%02X:%02X:%02X:%02X "
+                                  "src=%02X:%02X:%02X:%02X:%02X:%02X "
+                                  "ethertype=0x%04X tot_len=%u\r\n",
+                                  (unsigned long)unmatched_dump_cnt,
+                                  hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5],
+                                  hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
+                                  (unsigned)ethertype,
+                                  (unsigned)p->tot_len);
+                }
+              }
+            }
+          }
+
+          if (!skip_lwip_input)
+          {
+            err_t in_err = netif->input(p, netif);
+
+            if (in_err != ERR_OK)
+            {
+              g_rx_input_err_cnt++;
+              ETH_DebugPrintCounters("INPUT_ERR");
+              pbuf_free(p);
+            }
           }
         }
-      }
-      while ((p != NULL) && (RxAllocStatus == RX_ALLOC_OK));
-    }
-    else
-    {
-      uint32_t PHYLinkState = LAN8742_GetLinkState(&LAN8742);
-
-      if(netif_is_link_up(netif) && (PHYLinkState <= LAN8742_STATUS_LINK_DOWN))
-      {
-        tcpip_callback(netif_link_down_in_tcpip, netif);
-      }
-      else if(!netif_is_link_up(netif) && (PHYLinkState > LAN8742_STATUS_LINK_DOWN))
-      {
-        tcpip_callback(netif_link_up_in_tcpip, netif);
-      }
+      } while (p != NULL);
     }
   }
 }
@@ -1347,9 +1341,6 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef* ethHandle)
 
     HAL_NVIC_SetPriority(ETH_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(ETH_IRQn);
-
-    //DebugUART_Print("[ETH] MSP init done: RMII pins configured for NUCLEO-H723ZG\r\n");
-    //DebugUART_Print("[ETH] TX pins: PG11=TX_EN, PG13=TXD0, PB13=TXD1\r\n");
   }
 }
 
@@ -1451,6 +1442,7 @@ void ethernet_link_thread(void* argument)
   ETH_MACConfigTypeDef MACConf = {0};
   int32_t PHYLinkState = 0;
   struct netif *netif = (struct netif *)argument;
+  static uint32_t link_down_event_cnt = 0;   /* сколько раз линк падал за всё время работы */
 
   for (;;)
   {
@@ -1460,6 +1452,34 @@ void ethernet_link_thread(void* argument)
     {
       if (netif_is_link_up(netif))
       {
+        link_down_event_cnt++;
+
+        /*
+         * Диагностика причины падения линка: читаем BMSR (регистр 1)
+         * ДВАЖДЫ подряд. Бит Link Status в BMSR -- "защёлкивающийся"
+         * (latched low): первое чтение показывает, было ли событие
+         * потери линка с момента последнего опроса (даже кратковременное),
+         * второе чтение -- реальное состояние линка ПРЯМО СЕЙЧАС.
+         * Если первое чтение показывает "линк был потерян", а второе --
+         * "линк снова в порядке", это говорит о кратковременном сбое
+         * (например, наводка/помеха), а не о постоянном физическом
+         * отключении кабеля.
+         */
+        uint32_t bmsr_1 = 0;
+        uint32_t bmsr_2 = 0;
+        HAL_ETH_ReadPHYRegister(&heth, 0, 1 /* BMSR */, &bmsr_1);
+        HAL_ETH_ReadPHYRegister(&heth, 0, 1 /* BMSR */, &bmsr_2);
+
+        DebugUART_Print("[ETH] LINK DOWN event #%lu: BMSR(1st read)=0x%04lX "
+                        "BMSR(2nd read)=0x%04lX link_bit_1st=%lu link_bit_2nd=%lu "
+                        "PHYLinkState=%ld\r\n",
+                        (unsigned long)link_down_event_cnt,
+                        (unsigned long)bmsr_1,
+                        (unsigned long)bmsr_2,
+                        (unsigned long)((bmsr_1 >> 2) & 1UL),
+                        (unsigned long)((bmsr_2 >> 2) & 1UL),
+                        (long)PHYLinkState);
+
         HAL_ETH_Stop_IT(&heth);
 
         DebugUART_Print("[ETH] link_thread: scheduling LINK DOWN in tcpip_thread\r\n");
@@ -1517,7 +1537,8 @@ void ethernet_link_thread(void* argument)
                         (duplex == ETH_FULLDUPLEX_MODE) ? "FULL" : "HALF");
       }
 
-      DebugUART_Print("[ETH] link_thread: scheduling LINK UP in tcpip_thread\r\n");
+      DebugUART_Print("[ETH] link_thread: scheduling LINK UP in tcpip_thread (total down events so far: %lu)\r\n",
+                      (unsigned long)link_down_event_cnt);
       tcpip_callback(netif_link_up_in_tcpip, netif);
     }
 
@@ -1603,13 +1624,20 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t 
 
 void HAL_ETH_TxFreeCallback(uint32_t *buff)
 {
-	/*
-  if (buff != NULL)
-  {
-    struct pbuf *p = (struct pbuf *)buff;
-    pbuf_free(p);
-  }*/
-	(void)buff;
+    /*
+     * HAL вызывает этот колбэк из HAL_ETH_ReleaseTxPacket() для
+     * каждого завершённого TX-дескриптора, передавая обратно тот
+     * же адрес, что был указан в TxPacketConfig.pData при отправке.
+     * Мы передаём туда slot->frame, а т.к. frame -- первое поле
+     * структуры EthTxSlot_t, buff численно совпадает с адресом
+     * самого слота -- это даёт однозначную привязку "слот -> буфер"
+     * без всяких предположений о порядке завершения передач.
+     */
+    if (buff != NULL)
+    {
+        EthTxSlot_t *slot = (EthTxSlot_t *)buff;
+        slot->busy = 0;
+    }
 }
 /* USER CODE BEGIN 8 */
 

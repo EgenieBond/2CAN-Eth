@@ -20,6 +20,8 @@
 #include "core_task.h"
 #include "can_task.h"
 #include <string.h>
+#include "eth_raw_test.h"
+#include "eth_loopback_test.h"
 
 extern void ETH_DebugPrintCounters(const char *tag);
 /* USER CODE END Includes */
@@ -86,6 +88,22 @@ void StartDefaultTask(void *argument);
  */
 #define CAN_ONLY_DIRECT_TEST_LOOPBACK 0
 #define CAN_ONLY_DIRECT_TEST_BITRATE 500000U
+
+/*
+ * 1 = диагностический raw-Ethernet тест (по просьбе начальника):
+ *     отправка сырых кадров напрямую в обход TCP/UDP/IP.
+ *     Не запускает обычный TCP-сервер/CAN-конвейер.
+ */
+#define ETH_RAW_LINK_TEST 0
+
+/*
+ * 1 = диагностический тест: плата отправляет и принимает данные САМА
+ *     СЕБЕ через внутренний loopback PHY-микросхемы (LAN8742), без
+ *     выхода в кабель и без участия внешнего клиента. Проверяет
+ *     логику платы (DMA/TX/RX-пути) в изоляции от внешних факторов
+ *     (кабель, коммутатор, сетевой стек ПК).
+ */
+#define ETH_LOOPBACK_TEST 0
 
 static void CanOnlyDirectTest_Run(void);
 /* USER CODE END 0 */
@@ -389,8 +407,6 @@ static void MX_USART3_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART3_Init 2 */
-  uint8_t test_msg[] = "\r\n=== USART3 INIT OK (PD8/PD9) ===\r\n";
-  HAL_UART_Transmit(&huart3, test_msg, sizeof(test_msg)-1, 100);
   /* USER CODE END USART3_Init 2 */
 
 }
@@ -668,22 +684,33 @@ void StartDefaultTask(void *argument)
   __DSB();
   __ISB();
 
-
-  DebugUART_Print("[CPU] CCR = 0x%08lX\r\n", SCB->CCR);
   /* init lwIP */
   MX_LWIP_Init();
 
   /* init FDCAN before CAN task start */
   MX_FDCAN1_Init();
-  DebugUART_Print("[BOOT] after FDCAN1 init\r\n");
 
 #if CAN_ONLY_DIRECT_TEST
-  /*
-   * Автономный CAN-only режим:
-   * Ethernet/Core/CanTask не запускаются.
-   * Проверяется только FDCAN и физическая CAN-шина.
-   */
   CanOnlyDirectTest_Run();
+#elif ETH_RAW_LINK_TEST
+  EthRawTest_Start();
+
+  for (;;)
+  {
+    osDelay(1000);
+  }
+#elif ETH_LOOPBACK_TEST
+  /*
+   * Loopback-тест не требует CAN/TCP-конвейера — MX_LWIP_Init() уже
+   * выполнена выше (запустила heth, RxPktSemaphore/TxPktSemaphore,
+   * EthTxTask и ethernetif_input), этого достаточно для работы теста.
+   */
+  EthLoopbackTest_Start();
+
+  for (;;)
+  {
+    osDelay(1000);
+  }
 #else
   /* pipeline */
   EthApp_Init();
@@ -701,7 +728,6 @@ void StartDefaultTask(void *argument)
 }
 
  /* MPU Configuration */
-
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
@@ -780,6 +806,7 @@ void Error_Handler(void)
   * @param  line: assert_param error line source number
   * @retval None
   */
+
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */

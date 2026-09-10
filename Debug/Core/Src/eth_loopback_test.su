@@ -1,0 +1,5 @@
+../Core/Src/eth_loopback_test.c:52:6:EthLoopback_OnFrameReceived	16	static
+../Core/Src/eth_loopback_test.c:77:13:EthLoopback_EnsureMacStarted	112	static
+../Core/Src/eth_loopback_test.c:104:12:PHY_SetLoopback	40	static
+../Core/Src/eth_loopback_test.c:217:13:EthLoopbackTest_Task	1112	static
+../Core/Src/eth_loopback_test.c:353:6:EthLoopbackTest_Start	48	static

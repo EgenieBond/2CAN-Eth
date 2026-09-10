@@ -1,11 +1,20 @@
 /*
  * raw_tcp_server.c
  *
- * TCP RAW server (single client) + UDP benchmark mode
+ * TCP RAW server (multi-client, up to MAX_CLIENTS) + UDP benchmark mode
+ *
+ * Обычный режим (ETH_BENCHMARK_MODE == 0) принимает до MAX_CLIENTS
+ * одновременных подключений вместо одного.
+ * Каждому клиенту выделяется слот в g_clients[], индекс слота = client_id,
+ * передаётся дальше в client_handler.c во всех вызовах. Бенчмарк-режимы
+ * (1/2/3) остаются однoклиентскими, они диагностические
+ * инструменты, не часть основной задачи с несколькими клиентами.
  */
 
 #include "raw_tcp_server.h"
 #include "client_handler.h"
+#include "core_task.h"
+#include "app_queues.h"   /* MAX_CLIENTS */
 
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -22,48 +31,47 @@
 
 /*
  * ETH_BENCHMARK_MODE:
- *   0 = обычный рабочий режим (SLCAN)
+ *   0 = обычный рабочий режим (SLCAN), многоклиентский
  *   1 = Тест 1: ПК -> плата. Плата только считает входящие байты (TCP).
  *   2 = Тест 2: плата -> ПК. Плата сама генерирует и льёт данные клиенту (TCP).
  *   3 = Тест 3: ПК -> плата. UDP — максимальная скорость без TCP overhead.
  */
-#define ETH_BENCHMARK_MODE 1
+#define ETH_BENCHMARK_MODE 0
 
-#define BENCH_TARGET_BYTES  (100UL * 1024UL * 1024UL)
+#define BENCH_TARGET_BYTES  (1024UL * 1024UL * 1024UL)   /* 1 ГБ вместо 100 МБ */
 #define BENCH_PRINT_STEP    (10UL  * 1024UL * 1024UL)
 
-/* ===== TX ring (используется только в режиме 0) ===== */
+/*
+ * TX-кольцо на КАЖДОГО клиента, 2 КБ x MAX_CLIENTS(4) = 8 КБ суммарно
+ * столько же, сколько раньше занимал один общий буфер на 8 КБ.
+ * Ответы SLCAN очень маленькие, 2 КБ на клиента
+ * запас на сотни ожидающих отправки сообщений даже под нагрузкой.
+ */
+#define RAW_TCP_TX_RING_SIZE_PER_CLIENT   2048U
 
-#define RAW_TCP_TX_RING_SIZE 8192
-
-static struct tcp_pcb *server_pcb = NULL;
-static struct tcp_pcb *client_pcb = NULL;
-
-/* ===== TX буферный пул ===== */
-#define ETH_TX_POOL_SIZE  4U
+#define CLIENT_IDLE_TIMEOUT_MS   (10UL * 1000UL)
 
 typedef struct
 {
-    uint8_t           frame[1536];
-    ETH_BufferTypeDef desc;
-    volatile uint8_t  busy;
-} EthTxSlot_t;
+    struct tcp_pcb *pcb;
+    uint32_t last_activity_tick;
 
-static EthTxSlot_t g_TxPool[ETH_TX_POOL_SIZE]
-    __attribute__((section(".TxDecripSection"), aligned(32)));
+    uint8_t           tx_ring[RAW_TCP_TX_RING_SIZE_PER_CLIENT];
+    volatile uint32_t tx_head;
+    volatile uint32_t tx_tail;
+    volatile uint8_t  tx_flush_scheduled;
 
-static volatile uint32_t g_TxPoolHead = 0;
+    uint32_t tx_drop_count;
+    uint32_t tcp_err_mem_count;
+} tcp_client_t;
 
-static uint8_t g_tx_ring[RAW_TCP_TX_RING_SIZE];
-static volatile uint32_t g_tx_head = 0;
-static volatile uint32_t g_tx_tail = 0;
-static volatile uint8_t g_tx_flush_scheduled = 0;
+static struct tcp_pcb *server_pcb = NULL;
+static tcp_client_t g_clients[MAX_CLIENTS];
 
-static uint32_t g_tx_drop_count = 0;
-static uint32_t g_tcp_err_mem_count = 0;
-
-/* ===== Benchmark state (TCP MODE 1/2) ===== */
+/* ===== Benchmark state (TCP MODE 1/2) -- остаются однoклиентскими ===== */
 #if (ETH_BENCHMARK_MODE == 1) || (ETH_BENCHMARK_MODE == 2)
+
+static struct tcp_pcb *g_bench_client_pcb = NULL;
 
 static uint32_t g_bench_bytes      = 0;
 static uint32_t g_bench_last_print = 0;
@@ -84,10 +92,10 @@ static void Bench_PrintProgress(void)
         speed_kbps = (uint32_t)((uint64_t)g_bench_bytes * 8ULL / elapsed_ms);
     }
 
-    if (client_pcb != NULL)
+    if (g_bench_client_pcb != NULL)
     {
-        rcv_wnd = client_pcb->rcv_wnd;
-        rcv_nxt = client_pcb->rcv_nxt;
+        rcv_wnd = g_bench_client_pcb->rcv_wnd;
+        rcv_nxt = g_bench_client_pcb->rcv_nxt;
     }
 
     DebugUART_Print("[BENCH] %lu MB | %lu ms | %lu Kbit/s (%lu Mbit/s) | rcv_wnd=%u rcv_nxt=%lu\r\n",
@@ -194,7 +202,6 @@ static void udp_bench_recv(void *arg,
                 speed_kbps = (uint32_t)((uint64_t)g_udp_bytes * 8ULL / elapsed_ms);
             }
 
-            /* Считаем сколько пакетов должно было прийти при chunk=1400 */
             uint32_t expected_pkts = (BENCH_TARGET_BYTES + 1399U) / 1400U;
             uint32_t lost_pkts     = (expected_pkts > g_udp_pkts_received)
                                      ? (expected_pkts - g_udp_pkts_received) : 0U;
@@ -248,9 +255,9 @@ static void Bench_TxInit(void)
 
 static void Bench_TxPump(void)
 {
-    if (client_pcb == NULL)       { return; }
-    if (!g_bench_tx_buf_ready)    { return; }
-    if (g_bench_done)             { return; }
+    if (g_bench_client_pcb == NULL) { return; }
+    if (!g_bench_tx_buf_ready)      { return; }
+    if (g_bench_done)               { return; }
 
     for (;;)
     {
@@ -265,7 +272,7 @@ static void Bench_TxPump(void)
             break;
         }
 
-        u16_t sndbuf = tcp_sndbuf(client_pcb);
+        u16_t sndbuf = tcp_sndbuf(g_bench_client_pcb);
         if (sndbuf < BENCH_TX_BUF_SIZE) { break; }
 
         uint32_t remaining = BENCH_TARGET_BYTES - g_bench_bytes;
@@ -273,7 +280,7 @@ static void Bench_TxPump(void)
                              ? BENCH_TX_BUF_SIZE
                              : (uint16_t)remaining;
 
-        err_t wr = tcp_write(client_pcb, g_bench_tx_buf, to_send, TCP_WRITE_FLAG_COPY);
+        err_t wr = tcp_write(g_bench_client_pcb, g_bench_tx_buf, to_send, TCP_WRITE_FLAG_COPY);
         if (wr == ERR_MEM) { break; }
         if (wr != ERR_OK)
         {
@@ -290,9 +297,9 @@ static void Bench_TxPump(void)
         }
     }
 
-    if (client_pcb != NULL)
+    if (g_bench_client_pcb != NULL)
     {
-        err_t out = tcp_output(client_pcb);
+        err_t out = tcp_output(g_bench_client_pcb);
         if (out != ERR_OK)
         {
             DebugUART_Print("[BENCH TX] tcp_output err=%d\r\n", (int)out);
@@ -309,76 +316,86 @@ static void bench_tx_start_cb(void *arg)
 
 #endif /* ETH_BENCHMARK_MODE == 2 */
 
-/* ===== TX ring ===== */
+#if (ETH_BENCHMARK_MODE == 0)
 
-static uint32_t RawTcp_TxUsed(void)
+/* ===== TX-кольцо конкретного клиента (обычный многоклиентский режим) ===== */
+
+static uint32_t RawTcp_TxUsed(uint8_t id)
 {
-    if (g_tx_head >= g_tx_tail) { return g_tx_head - g_tx_tail; }
-    return RAW_TCP_TX_RING_SIZE - g_tx_tail + g_tx_head;
+    tcp_client_t *c = &g_clients[id];
+    if (c->tx_head >= c->tx_tail) { return c->tx_head - c->tx_tail; }
+    return RAW_TCP_TX_RING_SIZE_PER_CLIENT - c->tx_tail + c->tx_head;
 }
 
-static uint32_t RawTcp_TxFree(void)
+static uint32_t RawTcp_TxFree(uint8_t id)
 {
-    return RAW_TCP_TX_RING_SIZE - RawTcp_TxUsed() - 1U;
+    return RAW_TCP_TX_RING_SIZE_PER_CLIENT - RawTcp_TxUsed(id) - 1U;
 }
 
-static void RawTcp_TxReset(void)
+static void RawTcp_TxReset(uint8_t id)
 {
-    g_tx_head            = 0;
-    g_tx_tail            = 0;
-    g_tx_flush_scheduled = 0;
+    tcp_client_t *c = &g_clients[id];
+    c->tx_head            = 0;
+    c->tx_tail             = 0;
+    c->tx_flush_scheduled = 0;
 }
 
-static int RawTcp_TxPush(const uint8_t *data, size_t len)
+static int RawTcp_TxPush(uint8_t id, const uint8_t *data, size_t len)
 {
+    tcp_client_t *c = &g_clients[id];
+
     if ((data == NULL) || (len == 0U)) { return -1; }
 
     osKernelLock();
 
-    if (RawTcp_TxFree() < len)
+    if (RawTcp_TxFree(id) < len)
     {
         osKernelUnlock();
-        g_tx_drop_count++;
-        if ((g_tx_drop_count % 100U) == 0U)
+        c->tx_drop_count++;
+        if ((c->tx_drop_count % 100U) == 0U)
         {
-            DebugUART_Print("[TCP] TX ring drops=%lu\r\n",
-                            (unsigned long)g_tx_drop_count);
+            DebugUART_Print("[TCP] id=%u TX ring drops=%lu\r\n",
+                            (unsigned)id, (unsigned long)c->tx_drop_count);
         }
         return -2;
     }
 
     for (size_t i = 0; i < len; i++)
     {
-        g_tx_ring[g_tx_head] = data[i];
-        g_tx_head = (g_tx_head + 1U) % RAW_TCP_TX_RING_SIZE;
+        c->tx_ring[c->tx_head] = data[i];
+        c->tx_head = (c->tx_head + 1U) % RAW_TCP_TX_RING_SIZE_PER_CLIENT;
     }
 
     osKernelUnlock();
     return 0;
 }
 
-static uint32_t RawTcp_TxContiguousLen(void)
+static uint32_t RawTcp_TxContiguousLen(uint8_t id)
 {
-    if (g_tx_head == g_tx_tail) { return 0; }
-    if (g_tx_head > g_tx_tail)  { return g_tx_head - g_tx_tail; }
-    return RAW_TCP_TX_RING_SIZE - g_tx_tail;
+    tcp_client_t *c = &g_clients[id];
+    if (c->tx_head == c->tx_tail) { return 0; }
+    if (c->tx_head > c->tx_tail)  { return c->tx_head - c->tx_tail; }
+    return RAW_TCP_TX_RING_SIZE_PER_CLIENT - c->tx_tail;
 }
 
-static void RawTcp_TxConsume(uint32_t len)
+static void RawTcp_TxConsume(uint8_t id, uint32_t len)
 {
-    g_tx_tail = (g_tx_tail + len) % RAW_TCP_TX_RING_SIZE;
+    tcp_client_t *c = &g_clients[id];
+    c->tx_tail = (c->tx_tail + len) % RAW_TCP_TX_RING_SIZE_PER_CLIENT;
 }
 
-static void RawTcp_TryFlush(void)
+static void RawTcp_TryFlush(uint8_t id)
 {
-    if (client_pcb == NULL) { RawTcp_TxReset(); return; }
+    tcp_client_t *c = &g_clients[id];
+
+    if (c->pcb == NULL) { RawTcp_TxReset(id); return; }
 
     for (;;)
     {
-        uint32_t available = RawTcp_TxContiguousLen();
+        uint32_t available = RawTcp_TxContiguousLen(id);
         if (available == 0U) { break; }
 
-        u16_t sndbuf = tcp_sndbuf(client_pcb);
+        u16_t sndbuf = tcp_sndbuf(c->pcb);
         if (sndbuf == 0U)   { break; }
 
         uint32_t to_send = available;
@@ -386,29 +403,29 @@ static void RawTcp_TryFlush(void)
         if (to_send > 1460U)  { to_send = 1460U;  }
         if (to_send == 0U)    { break; }
 
-        err_t wr = tcp_write(client_pcb,
-                             &g_tx_ring[g_tx_tail],
+        err_t wr = tcp_write(c->pcb,
+                             &c->tx_ring[c->tx_tail],
                              (u16_t)to_send,
                              TCP_WRITE_FLAG_COPY);
 
         if (wr == ERR_MEM)
         {
-            g_tcp_err_mem_count++;
+            c->tcp_err_mem_count++;
             break;
         }
 
         if (wr != ERR_OK)
         {
-            DebugUART_Print("[TCP] tcp_write err=%d\r\n", (int)wr);
+            DebugUART_Print("[TCP] id=%u tcp_write err=%d\r\n", (unsigned)id, (int)wr);
             break;
         }
 
-        RawTcp_TxConsume(to_send);
+        RawTcp_TxConsume(id, to_send);
 
-        err_t out = tcp_output(client_pcb);
+        err_t out = tcp_output(c->pcb);
         if (out != ERR_OK)
         {
-            DebugUART_Print("[TCP] tcp_output err=%d\r\n", (int)out);
+            DebugUART_Print("[TCP] id=%u tcp_output err=%d\r\n", (unsigned)id, (int)out);
             break;
         }
     }
@@ -416,26 +433,184 @@ static void RawTcp_TryFlush(void)
 
 static void raw_tcp_flush_cb(void *arg)
 {
-    LWIP_UNUSED_ARG(arg);
-    g_tx_flush_scheduled = 0;
-    RawTcp_TryFlush();
+    uint8_t id = (uint8_t)(uintptr_t)arg;
+    if (id >= MAX_CLIENTS) { return; }
+    g_clients[id].tx_flush_scheduled = 0;
+    RawTcp_TryFlush(id);
 }
 
-static void RawTcp_ScheduleFlush(void)
+static void RawTcp_ScheduleFlush(uint8_t id)
 {
-    if (client_pcb == NULL)   { return; }
-    if (g_tx_flush_scheduled) { return; }
-    g_tx_flush_scheduled = 1;
+    tcp_client_t *c = &g_clients[id];
 
-    err_t cb_err = tcpip_callback(raw_tcp_flush_cb, NULL);
+    if (c->pcb == NULL)             { return; }
+    if (c->tx_flush_scheduled)      { return; }
+    c->tx_flush_scheduled = 1;
+
+    err_t cb_err = tcpip_callback(raw_tcp_flush_cb, (void*)(uintptr_t)id);
     if (cb_err != ERR_OK)
     {
-        g_tx_flush_scheduled = 0;
-        DebugUART_Print("[TCP] tcpip_callback(flush) err=%d\r\n", (int)cb_err);
+        c->tx_flush_scheduled = 0;
+        DebugUART_Print("[TCP] id=%u tcpip_callback(flush) err=%d\r\n",
+                        (unsigned)id, (int)cb_err);
     }
 }
 
-/* ===== CALLBACKS ===== */
+/* ===== CALLBACKS (многоклиентский обычный режим) ===== */
+
+static void RawTcp_HandleClientGone(uint8_t id)
+{
+    g_clients[id].pcb = NULL;
+    RawTcp_TxReset(id);
+    CoreTask_NotifyClientGone(id);      /* ДО ClientHandler_ClientDisconnected --
+                                            синтетическая команда "C\r" должна уйти
+                                            в очередь до того, как обнулятся буферы
+                                            клиента */
+    ClientHandler_ClientDisconnected(id);
+}
+
+static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
+{
+    uint8_t id = (uint8_t)(uintptr_t)arg;
+    LWIP_UNUSED_ARG(tpcb);
+    LWIP_UNUSED_ARG(len);
+
+    if (id >= MAX_CLIENTS) { return ERR_OK; }
+
+    g_clients[id].last_activity_tick = osKernelGetTickCount();
+    RawTcp_TryFlush(id);
+
+    return ERR_OK;
+}
+
+static void tcp_server_error(void *arg, err_t err)
+{
+    uint8_t id = (uint8_t)(uintptr_t)arg;
+
+    if (id >= MAX_CLIENTS) { return; }
+
+    DebugUART_Print("[TCP] id=%u ERROR cb err=%d\r\n", (unsigned)id, (int)err);
+    DebugUART_Print("[TCP] id=%u TX drop count=%lu ERR_MEM count=%lu\r\n",
+                    (unsigned)id,
+                    (unsigned long)g_clients[id].tx_drop_count,
+                    (unsigned long)g_clients[id].tcp_err_mem_count);
+
+    RawTcp_HandleClientGone(id);
+}
+
+static err_t tcp_server_recv(void *arg,
+                             struct tcp_pcb *tpcb,
+                             struct pbuf *p,
+                             err_t err)
+{
+    uint8_t id = (uint8_t)(uintptr_t)arg;
+
+    if (id >= MAX_CLIENTS)
+    {
+        if (p != NULL) { pbuf_free(p); }
+        return ERR_OK;
+    }
+
+    g_clients[id].last_activity_tick = osKernelGetTickCount();
+
+    if (p == NULL)
+    {
+        DebugUART_Print("[TCP] id=%u Client disconnected\r\n", (unsigned)id);
+
+        tcp_arg(tpcb, NULL);
+        tcp_recv(tpcb, NULL);
+        tcp_sent(tpcb, NULL);
+        tcp_err(tpcb, NULL);
+
+        err_t close_err = tcp_close(tpcb);
+        if (close_err != ERR_OK)
+        {
+            tcp_abort(tpcb);
+        }
+
+        RawTcp_HandleClientGone(id);
+        return ERR_OK;
+    }
+
+    if (err != ERR_OK)
+    {
+        DebugUART_Print("[TCP] id=%u RECV err=%d\r\n", (unsigned)id, (int)err);
+        pbuf_free(p);
+        return err;
+    }
+
+    /*
+     * tcp_output() здесь убран сознательно -- см. подробный комментарий
+     * в истории версий файла: форсированный ACK на каждый пакет
+     * конкурировал с RX-обработкой в tcpip_thread и вызывал нехватку
+     * RX-буферов на высокой скорости. lwIP сам отправит ACK по своему
+     * delayed-ACK таймеру.
+     */
+    tcp_recved(tpcb, p->tot_len);
+
+    for (struct pbuf *q = p; q != NULL; q = q->next)
+    {
+        ClientHandler_InputBytes(id, (const uint8_t *)q->payload, q->len);
+    }
+
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static err_t tcp_server_accept(void *arg,
+                               struct tcp_pcb *newpcb,
+                               err_t err)
+{
+    LWIP_UNUSED_ARG(arg);
+    uint8_t free_id = MAX_CLIENTS;
+
+    if ((err != ERR_OK) || (newpcb == NULL))
+    {
+        DebugUART_Print("[TCP] ACCEPT err=%d\r\n", (int)err);
+        return ERR_VAL;
+    }
+
+    for (uint8_t id = 0; id < MAX_CLIENTS; id++)
+    {
+        if (g_clients[id].pcb == NULL)
+        {
+            free_id = id;
+            break;
+        }
+    }
+
+    if (free_id == MAX_CLIENTS)
+    {
+        DebugUART_Print("[TCP] Reject client -- all %u slots full\r\n",
+                        (unsigned)MAX_CLIENTS);
+        tcp_abort(newpcb);
+        return ERR_ABRT;
+    }
+
+    g_clients[free_id].pcb = newpcb;
+    g_clients[free_id].last_activity_tick = osKernelGetTickCount();
+    RawTcp_TxReset(free_id);
+    ClientHandler_ClientConnected(free_id);
+    CoreTask_ClientConnected(free_id);
+
+    DebugUART_Print("[TCP] id=%u ACCEPT from %d.%d.%d.%d:%u\r\n",
+                    (unsigned)free_id,
+                    ip4_addr1(&newpcb->remote_ip),
+                    ip4_addr2(&newpcb->remote_ip),
+                    ip4_addr3(&newpcb->remote_ip),
+                    ip4_addr4(&newpcb->remote_ip),
+                    (unsigned)newpcb->remote_port);
+
+    tcp_nagle_disable(newpcb);
+    tcp_arg(newpcb, (void*)(uintptr_t)free_id);
+    tcp_recv(newpcb, tcp_server_recv);
+    tcp_err(newpcb, tcp_server_error);
+    tcp_sent(newpcb, tcp_server_sent);
+
+    return ERR_OK;
+}
+
+#else /* ETH_BENCHMARK_MODE != 0 -- бенчмарк-режимы, однoклиентские, как раньше */
 
 static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
@@ -445,8 +620,6 @@ static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 
 #if (ETH_BENCHMARK_MODE == 2)
     Bench_TxPump();
-#else
-    RawTcp_TryFlush();
 #endif
 
     return ERR_OK;
@@ -456,14 +629,6 @@ static void tcp_server_error(void *arg, err_t err)
 {
     LWIP_UNUSED_ARG(arg);
     DebugUART_Print("[TCP] ERROR cb err=%d\r\n", (int)err);
-    DebugUART_Print("[TCP] TX drop count=%lu ERR_MEM count=%lu\r\n",
-                    (unsigned long)g_tx_drop_count,
-                    (unsigned long)g_tcp_err_mem_count);
-
-    /* Полная статистика ETH прямо в момент обрыва — особенно важно
-       для случаев, когда сбой происходит ДО первого порогового
-       принта Bench_PrintProgress (то есть меньше 10 МБ передано) и
-       иначе остаётся совершенно не видно, что творилось внутри. */
     ETH_DebugPrintCounters("TCP-ERR");
 
 #if (ETH_BENCHMARK_MODE == 1)
@@ -477,8 +642,7 @@ static void tcp_server_error(void *arg, err_t err)
     }
 #endif
 
-    client_pcb = NULL;
-    RawTcp_TxReset();
+    g_bench_client_pcb = NULL;
 }
 
 static err_t tcp_server_recv(void *arg,
@@ -511,8 +675,7 @@ static err_t tcp_server_recv(void *arg,
             tcp_abort(tpcb);
         }
 
-        client_pcb = NULL;
-        RawTcp_TxReset();
+        g_bench_client_pcb = NULL;
         return ERR_OK;
     }
 
@@ -524,8 +687,6 @@ static err_t tcp_server_recv(void *arg,
     }
 
     tcp_recved(tpcb, p->tot_len);
-    /* tcp_output убран — LwIP сам отправит ACK через delayed ACK */
-     tcp_output(tpcb);
 
     for (struct pbuf *q = p; q != NULL; q = q->next)
     {
@@ -565,12 +726,6 @@ static err_t tcp_server_recv(void *arg,
                 }
 
                 DebugUART_Print("[BENCH RX] === DONE ===\r\n");
-                DebugUART_Print("[BENCH RX] start tick : %lu ms\r\n",
-                                (unsigned long)g_bench_start_tick_abs);
-                DebugUART_Print("[BENCH RX] end tick   : %lu ms\r\n",
-                                (unsigned long)end_tick);
-                DebugUART_Print("[BENCH RX] duration   : %lu ms\r\n",
-                                (unsigned long)elapsed_ms);
                 DebugUART_Print("[BENCH RX] total bytes: %lu\r\n",
                                 (unsigned long)g_bench_bytes);
                 DebugUART_Print("[BENCH RX] avg speed  : %lu Kbit/s (%lu Mbit/s)\r\n",
@@ -581,9 +736,6 @@ static err_t tcp_server_recv(void *arg,
 
 #elif (ETH_BENCHMARK_MODE == 2)
         (void)len;
-
-#else
-        ClientHandler_InputBytes((const uint8_t *)q->payload, len);
 #endif
     }
 
@@ -603,15 +755,14 @@ static err_t tcp_server_accept(void *arg,
         return ERR_VAL;
     }
 
-    if (client_pcb != NULL)
+    if (g_bench_client_pcb != NULL)
     {
-        DebugUART_Print("[TCP] Reject 2nd client\r\n");
+        DebugUART_Print("[TCP] Reject 2nd client (benchmark mode -- single client only)\r\n");
         tcp_abort(newpcb);
         return ERR_ABRT;
     }
 
-    client_pcb = newpcb;
-    RawTcp_TxReset();
+    g_bench_client_pcb = newpcb;
 
 #if (ETH_BENCHMARK_MODE == 1)
     Bench_Reset();
@@ -643,29 +794,79 @@ static err_t tcp_server_accept(void *arg,
     return ERR_OK;
 }
 
+#endif /* ETH_BENCHMARK_MODE */
+
 /* ===== PUBLIC API ===== */
 
-int RawTcpServer_HasClient(void)
+int RawTcpServer_HasClient(uint8_t client_id)
 {
-    return (client_pcb != NULL) ? 1 : 0;
+#if (ETH_BENCHMARK_MODE == 0)
+    if (client_id >= MAX_CLIENTS) { return 0; }
+    return (g_clients[client_id].pcb != NULL) ? 1 : 0;
+#else
+    LWIP_UNUSED_ARG(client_id);
+    return (g_bench_client_pcb != NULL) ? 1 : 0;
+#endif
 }
 
-int RawTcpServer_Send(const uint8_t *data, size_t len)
+int RawTcpServer_Send(uint8_t client_id, const uint8_t *data, size_t len)
 {
-    if ((data == NULL) || (len == 0U)) { return -1; }
-    if (client_pcb == NULL)            { return -2; }
-    if (RawTcp_TxPush(data, len) != 0) { return -3; }
-    RawTcp_TryFlush();
+#if (ETH_BENCHMARK_MODE == 0)
+    if ((data == NULL) || (len == 0U))        { return -1; }
+    if (client_id >= MAX_CLIENTS)              { return -2; }
+    if (g_clients[client_id].pcb == NULL)      { return -2; }
+    if (RawTcp_TxPush(client_id, data, len) != 0) { return -3; }
+    RawTcp_TryFlush(client_id);
     return 0;
+#else
+    LWIP_UNUSED_ARG(client_id);
+    LWIP_UNUSED_ARG(data);
+    LWIP_UNUSED_ARG(len);
+    return -1;   /* не используется в бенчмарк-режимах */
+#endif
 }
 
-int RawTcpServer_SendAsync(const uint8_t *data, size_t len)
+int RawTcpServer_SendAsync(uint8_t client_id, const uint8_t *data, size_t len)
 {
-    if ((data == NULL) || (len == 0U)) { return -1; }
-    if (client_pcb == NULL)            { return -2; }
-    if (RawTcp_TxPush(data, len) != 0) { return -3; }
-    RawTcp_ScheduleFlush();
+#if (ETH_BENCHMARK_MODE == 0)
+    if ((data == NULL) || (len == 0U))        { return -1; }
+    if (client_id >= MAX_CLIENTS)              { return -2; }
+    if (g_clients[client_id].pcb == NULL)      { return -2; }
+    if (RawTcp_TxPush(client_id, data, len) != 0) { return -3; }
+    RawTcp_ScheduleFlush(client_id);
     return 0;
+#else
+    LWIP_UNUSED_ARG(client_id);
+    LWIP_UNUSED_ARG(data);
+    LWIP_UNUSED_ARG(len);
+    return -1;
+#endif
+}
+
+/*
+ * Проверка "завис ли клиент" -- вызывать периодически из tcpip_thread.
+ * В многоклиентском режиме проходит по ВСЕМ занятым слотам.
+ */
+void RawTcpServer_CheckIdleTimeout(void)
+{
+#if (ETH_BENCHMARK_MODE == 0)
+    uint32_t now = osKernelGetTickCount();
+
+    for (uint8_t id = 0; id < MAX_CLIENTS; id++)
+    {
+        if (g_clients[id].pcb == NULL) { continue; }
+
+        if ((now - g_clients[id].last_activity_tick) > CLIENT_IDLE_TIMEOUT_MS)
+        {
+            DebugUART_Print("[TCP] id=%u idle timeout -- forcing abort\r\n", (unsigned)id);
+            tcp_abort(g_clients[id].pcb);
+            RawTcp_HandleClientGone(id);
+        }
+    }
+#else
+    /* бенчмарк-режимы: не трогаем -- диагностические тесты и так
+     * ограничены по времени вручную (запуск/останов скрипта) */
+#endif
 }
 
 /* ===== INIT ===== */
@@ -685,7 +886,8 @@ void RawTcpServer_Init(void)
 #elif (ETH_BENCHMARK_MODE == 3)
     DebugUART_Print("[UDP BENCH] MODE 3: PC -> STM32 (UDP RX speed test)\r\n");
 #else
-    DebugUART_Print("[TCP] Normal SLCAN mode\r\n");
+    DebugUART_Print("[TCP] Normal SLCAN mode -- multi-client, MAX_CLIENTS=%u\r\n",
+                    (unsigned)MAX_CLIENTS);
 #endif
 
 #if (ETH_BENCHMARK_MODE != 3)
@@ -706,7 +908,13 @@ void RawTcpServer_Init(void)
     }
 
     err_t err2 = ERR_OK;
+#if (ETH_BENCHMARK_MODE == 0)
+    /* backlog = MAX_CLIENTS, чтобы lwIP не отбрасывал SYN, пока принимаем
+     * подключения по одному в tcp_server_accept() */
+    server_pcb = tcp_listen_with_backlog_and_err(server_pcb, MAX_CLIENTS, &err2);
+#else
     server_pcb = tcp_listen_with_backlog_and_err(server_pcb, 1, &err2);
+#endif
     if (server_pcb == NULL)
     {
         DebugUART_Print("[TCP] tcp_listen failed err=%d\r\n", (int)err2);

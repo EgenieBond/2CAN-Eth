@@ -125,17 +125,10 @@ SECTIONS
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
   
-    .RxDecripSection (NOLOAD) :
+  .RxDecripSection (NOLOAD) :
   {
     . = ALIGN(32);
     *(.RxDecripSection)
-    . = ALIGN(32);
-  } >RAM_D2
-
-  .TxDecripSection (NOLOAD) :
-  {
-    . = ALIGN(32);
-    *(.TxDecripSection)
     . = ALIGN(32);
   } >RAM_D2
 
@@ -145,7 +138,28 @@ SECTIONS
     *(.Rx_PoolSection)
     . = ALIGN(32);
   } >RAM_D2
-  
+
+  /* Явный отступ между RX- и TX-областями DMA. Цель — физически
+     развести приём и передачу как можно дальше друг от друга внутри
+     единственного банка памяти, реально доступного Ethernet-DMA
+     (RAM_D3 недоступен контроллеру — проверено экспериментально),
+     чтобы снизить конкуренцию за шину AHB при одновременной работе
+     RX- и TX-каналов DMA на высокой частоте. */
+  .DmaGapSection (NOLOAD) :
+{
+  . = ALIGN(32);
+  . = . + 0x800;   /* возврат к проверенным 2048 байтам —
+                       128 байт оказалось недостаточно и
+                       воспроизвело DMA TX failure (hal_err=DMA|BUSY) */
+  . = ALIGN(32);
+} >RAM_D2
+
+  .TxDecripSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.TxDecripSection)
+    . = ALIGN(32);
+  } >RAM_D2
 
   /* Initialized data sections goes into RAM, load LMA copy after code */
   .data :

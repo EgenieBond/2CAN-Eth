@@ -61,7 +61,7 @@ extern "C" {
 #define LWIP_NETIF_LINK_CALLBACK          1
 //#define TCPIP_THREAD_STACKSIZE            16384    //было при UDP
 #define TCPIP_THREAD_STACKSIZE            8192
-#define TCPIP_THREAD_PRIO                 ((osPriority_t)osPriorityHigh)
+#define TCPIP_THREAD_PRIO                 ((osPriority_t)osPriorityAboveNormal)
 #define TCPIP_MBOX_SIZE                   32
 #define SLIPIF_THREAD_STACKSIZE           1024
 #define SLIPIF_THREAD_PRIO                3

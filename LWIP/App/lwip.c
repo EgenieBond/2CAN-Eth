@@ -100,8 +100,6 @@ void MX_LWIP_Init(void)
   attributes.priority = osPriorityBelowNormal;
   osThreadNew(ethernet_link_thread, &gnetif, &attributes);
 
-  DebugUART_Print("[LWIP] Ethernet link thread created\r\n");
-
   DebugUART_Print("[LWIP] IP: %d.%d.%d.%d\r\n",
                   ip4_addr1(netif_ip4_addr(&gnetif)),
                   ip4_addr2(netif_ip4_addr(&gnetif)),
