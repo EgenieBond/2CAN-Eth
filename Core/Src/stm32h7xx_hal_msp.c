@@ -84,6 +84,12 @@ void HAL_MspInit(void)
 * @param hfdcan: FDCAN handle pointer
 * @retval None
 */
+/* Счётчик включений тактирования FDCAN -- FDCAN1 и FDCAN2 используют
+   ОДИН общий разрешающий бит тактирования, поэтому нельзя просто
+   вызывать __HAL_RCC_FDCAN_CLK_DISABLE() при деинициализации любого
+   из них, если другой ещё активен. */
+static uint32_t HAL_RCC_FDCAN_CLK_ENABLED = 0;
+
 void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -97,15 +103,25 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
   /** Initializes the peripherals clock
   */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
-    //PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_PLL;
-    PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_HSE;
+    PeriphClkInitStruct.PLL2.PLL2M = 4;
+    PeriphClkInitStruct.PLL2.PLL2N = 32;
+    PeriphClkInitStruct.PLL2.PLL2P = 2;
+    PeriphClkInitStruct.PLL2.PLL2Q = 4;
+    PeriphClkInitStruct.PLL2.PLL2R = 2;
+    PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_2;
+    PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOWIDE;
+    PeriphClkInitStruct.PLL2.PLL2FRACN = 0;
+    PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_PLL2;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
     {
       Error_Handler();
     }
 
     /* Peripheral clock enable */
-    __HAL_RCC_FDCAN_CLK_ENABLE();
+    HAL_RCC_FDCAN_CLK_ENABLED++;
+    if(HAL_RCC_FDCAN_CLK_ENABLED==1){
+      __HAL_RCC_FDCAN_CLK_ENABLE();
+    }
 
     __HAL_RCC_GPIOD_CLK_ENABLE();
     /**FDCAN1 GPIO Configuration
@@ -120,10 +136,36 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
+
   /* USER CODE END FDCAN1_MspInit 1 */
 
+  }
+  else if(hfdcan->Instance==FDCAN2)
+  {
+  /* USER CODE BEGIN FDCAN2_MspInit 0 */
+
+  /* USER CODE END FDCAN2_MspInit 0 */
+    /* Peripheral clock enable */
+    HAL_RCC_FDCAN_CLK_ENABLED++;
+    if(HAL_RCC_FDCAN_CLK_ENABLED==1){
+      __HAL_RCC_FDCAN_CLK_ENABLE();
+    }
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    /**FDCAN2 GPIO Configuration
+    PB5     ------> FDCAN2_RX
+    PB6     ------> FDCAN2_TX
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF9_FDCAN2;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN FDCAN2_MspInit 1 */
+
+  /* USER CODE END FDCAN2_MspInit 1 */
   }
 
 }
@@ -142,7 +184,10 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* hfdcan)
 
   /* USER CODE END FDCAN1_MspDeInit 0 */
     /* Peripheral clock disable */
-    __HAL_RCC_FDCAN_CLK_DISABLE();
+    HAL_RCC_FDCAN_CLK_ENABLED--;
+    if(HAL_RCC_FDCAN_CLK_ENABLED==0){
+      __HAL_RCC_FDCAN_CLK_DISABLE();
+    }
 
     /**FDCAN1 GPIO Configuration
     PD0     ------> FDCAN1_RX
@@ -153,6 +198,27 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* hfdcan)
   /* USER CODE BEGIN FDCAN1_MspDeInit 1 */
 
   /* USER CODE END FDCAN1_MspDeInit 1 */
+  }
+  else if(hfdcan->Instance==FDCAN2)
+  {
+  /* USER CODE BEGIN FDCAN2_MspDeInit 0 */
+
+  /* USER CODE END FDCAN2_MspDeInit 0 */
+    /* Peripheral clock disable */
+    HAL_RCC_FDCAN_CLK_ENABLED--;
+    if(HAL_RCC_FDCAN_CLK_ENABLED==0){
+      __HAL_RCC_FDCAN_CLK_DISABLE();
+    }
+
+    /**FDCAN2 GPIO Configuration
+    PB5     ------> FDCAN2_RX
+    PB6     ------> FDCAN2_TX
+    */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_5|GPIO_PIN_6);
+
+  /* USER CODE BEGIN FDCAN2_MspDeInit 1 */
+
+  /* USER CODE END FDCAN2_MspDeInit 1 */
   }
 
 }
@@ -176,7 +242,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
   /** Initializes the peripherals clock
   */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART3;
-    PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_D2PCLK1;
+    PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_HSI;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
     {
       Error_Handler();

@@ -50,20 +50,21 @@ typedef int sys_prot_t;
 /* define compiler specific symbols */
 #if defined (__ICCARM__)
 
-#define PACK_STRUCT_BEGIN
+#define PACK_STRUCT_BEGIN _Pragma("pack(push, 1)")
 #define PACK_STRUCT_STRUCT
-#define PACK_STRUCT_END
+#define PACK_STRUCT_END _Pragma("pack(pop)")
+#define PACK_STRUCT_FLD_8(x) x
+#define PACK_STRUCT_FLD_S(x) x
+
 #define PACK_STRUCT_FIELD(x) x
 #define PACK_STRUCT_USE_INCLUDES
 
 #elif defined (__GNUC__)
 
-#define PACK_STRUCT_BEGIN _Pragma("pack(push, 1)")
-#define PACK_STRUCT_STRUCT
-#define PACK_STRUCT_END _Pragma("pack(pop)")
+#define PACK_STRUCT_BEGIN
+#define PACK_STRUCT_STRUCT __attribute__ ((__packed__))
+#define PACK_STRUCT_END
 #define PACK_STRUCT_FIELD(x) x
-#define PACK_STRUCT_FLD_8(x) x
-#define PACK_STRUCT_FLD_S(x) x
 
 #elif defined (__CC_ARM)
 
@@ -95,10 +96,8 @@ typedef int sys_prot_t;
 } while (0)
 #endif
 
-#ifndef LWIP_PLATFORM_ASSERT
 #define LWIP_PLATFORM_ASSERT(x) do {printf("Assertion \"%s\" failed at line %d in %s\n", \
                                      x, __LINE__, __FILE__); } while(0)
-#endif
 
 /* Define random number generator function */
 #define LWIP_RAND() ((u32_t)rand())

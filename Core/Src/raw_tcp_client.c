@@ -138,7 +138,8 @@ static err_t raw_tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p
          * Мы уже внутри raw callback, то есть внутри tcpip_thread,
          * поэтому RawTcpServer_Send() можно вызывать напрямую.
          */
-        int rc = RawTcpServer_Send(data, len);
+        int rc = RawTcpServer_Send(0U, data, len);   /* client_id=0 -- файл сейчас не используется,
+                                                          это просто заглушка для компиляции */
 
         if (rc == 0)
         {

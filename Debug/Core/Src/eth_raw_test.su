@@ -1,0 +1,4 @@
+../Core/Src/eth_raw_test.c:54:14:RawEthTest_SendFrame	40	static
+../Core/Src/eth_raw_test.c:100:13:RawEthTest_RunBatch	120	static
+../Core/Src/eth_raw_test.c:167:13:EthRawTest_Task	16	static
+../Core/Src/eth_raw_test.c:211:6:EthRawTest_Start	48	static

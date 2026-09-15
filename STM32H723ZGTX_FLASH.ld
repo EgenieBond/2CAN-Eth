@@ -125,17 +125,10 @@ SECTIONS
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
   
-    .RxDecripSection (NOLOAD) :
+  .RxDecripSection (NOLOAD) :
   {
     . = ALIGN(32);
     *(.RxDecripSection)
-    . = ALIGN(32);
-  } >RAM_D2
-
-  .TxDecripSection (NOLOAD) :
-  {
-    . = ALIGN(32);
-    *(.TxDecripSection)
     . = ALIGN(32);
   } >RAM_D2
 
@@ -145,7 +138,28 @@ SECTIONS
     *(.Rx_PoolSection)
     . = ALIGN(32);
   } >RAM_D2
-  
+
+  /* Явный отступ между RX- и TX-областями DMA. Цель — физически
+     развести приём и передачу как можно дальше друг от друга внутри
+     единственного банка памяти, реально доступного Ethernet-DMA
+     (RAM_D3 недоступен контроллеру — проверено экспериментально),
+     чтобы снизить конкуренцию за шину AHB при одновременной работе
+     RX- и TX-каналов DMA на высокой частоте. */
+  .DmaGapSection (NOLOAD) :
+{
+  . = ALIGN(32);
+  . = . + 0x800;   /* возврат к проверенным 2048 байтам —
+                       128 байт оказалось недостаточно и
+                       воспроизвело DMA TX failure (hal_err=DMA|BUSY) */
+  . = ALIGN(32);
+} >RAM_D2
+
+  .TxDecripSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.TxDecripSection)
+    . = ALIGN(32);
+  } >RAM_D2
 
   /* Initialized data sections goes into RAM, load LMA copy after code */
   .data :
@@ -160,6 +174,17 @@ SECTIONS
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
   } >RAM_D1 AT> FLASH
+
+	/* ===== LwIP буферы в DTCMRAM ===== */
+	.lwip_data (NOLOAD) :
+	{
+	  . = ALIGN(32);
+	  __lwip_dtcm_start__ = .;
+	  *(.lwip_dtcm)
+	  . = ALIGN(32);
+	  __lwip_dtcm_end__ = .;
+	} >DTCMRAM
+
 
   /* Uninitialized data section */
   . = ALIGN(4);
@@ -177,12 +202,13 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM_D1
   
+  
     /* ===== lwIP heap region (must NOT overlap .bss / FreeRTOS heap) ===== */
-  .lwip_heap (NOLOAD) :
+.lwip_heap (NOLOAD) :
 {
   . = ALIGN(32);
   __lwip_heap_start__ = .;
-  . = . + 0x10000;            /* 64 KB */
+  . = . + 0x4000;            /* было 0xC000 (48KB), стало 0x8000 (32KB) */
   __lwip_heap_end__ = .;
   . = ALIGN(32);
 } >RAM_D1

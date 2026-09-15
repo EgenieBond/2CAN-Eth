@@ -64,7 +64,6 @@ Middlewares/Third_Party/LwIP/src/netif/ethernet.o: \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/ip6.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/ip.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/snmp.h \
- ../Core/Inc/debug_uart.h \
  ../Middlewares/Third_Party/LwIP/src/include/netif/ppp/ppp_opts.h
 ../Middlewares/Third_Party/LwIP/src/include/lwip/opt.h:
 ../LWIP/Target/lwipopts.h:
@@ -131,5 +130,4 @@ Middlewares/Third_Party/LwIP/src/netif/ethernet.o: \
 ../Middlewares/Third_Party/LwIP/src/include/lwip/ip6.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/prot/ip.h:
 ../Middlewares/Third_Party/LwIP/src/include/lwip/snmp.h:
-../Core/Inc/debug_uart.h:
 ../Middlewares/Third_Party/LwIP/src/include/netif/ppp/ppp_opts.h:

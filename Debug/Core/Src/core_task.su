@@ -1,6 +1,11 @@
-../Core/Src/core_task.c:44:13:CoreTask_PrintBitrate	24	static
-../Core/Src/core_task.c:61:13:CoreTask_HandleEthCommand	136	static
-../Core/Src/core_task.c:274:20:CoreTask_CmdTypeToStr	16	static
-../Core/Src/core_task.c:288:13:CoreTask_HandleCanRx	80	static
-../Core/Src/core_task.c:336:13:CoreTask	96	static
-../Core/Src/core_task.c:367:6:CoreTask_Start	48	static
+../Core/Src/core_task.c:65:13:CoreTask_PrintBitrate	24	static
+../Core/Src/core_task.c:77:13:CoreTask_SendResponse	16	static
+../Core/Src/core_task.c:91:13:CoreTask_SetFrameAck	16	static
+../Core/Src/core_task.c:108:12:CoreTask_TryOpenChannel	48	static
+../Core/Src/core_task.c:174:13:CoreTask_CloseChannel	24	static
+../Core/Src/core_task.c:215:13:CoreTask_HandleEthCommand	176	static
+../Core/Src/core_task.c:359:13:CoreTask_HandleCanRx	160	static
+../Core/Src/core_task.c:398:6:CoreTask_ClientConnected	16	static
+../Core/Src/core_task.c:415:6:CoreTask_NotifyClientGone	88	static
+../Core/Src/core_task.c:429:13:CoreTask	120	static
+../Core/Src/core_task.c:510:6:CoreTask_Start	48	static
