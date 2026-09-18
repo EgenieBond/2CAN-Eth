@@ -224,6 +224,20 @@ static void ClientHandler_DrainRxCmdsToCore(uint8_t id)
     }
 }
 
+uint32_t ClientHandler_RxRingFreeBytes(uint8_t client_id)
+{
+    uint32_t free_bytes;
+
+    if (client_id >= MAX_CLIENTS)        { return 0; }
+    if (!g_clients[client_id].in_use)    { return 0; }
+
+    osKernelLock();
+    free_bytes = ClientHandler_RxRingFree(client_id);
+    osKernelUnlock();
+
+    return free_bytes;
+}
+
 void ClientHandler_InputBytes(uint8_t client_id, const uint8_t *data, size_t len)
 {
     client_slot_t *c;

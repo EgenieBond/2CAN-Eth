@@ -184,10 +184,13 @@ void EthernetTask(void *argument)
   {
 	  osDelay(2000);
 	  tcpip_callback((void (*)(void*))RawTcpServer_CheckIdleTimeout, NULL);
-    static uint32_t last_irq = 0, last_sem = 0;
 
-    last_irq = g_rx_irq_cnt;
-    last_sem = g_rx_sem_cnt;
+	  //DebugUART_Print("[HEARTBEAT] alive, tick=%lu\r\n", (unsigned long)osKernelGetTickCount());
+	  //stats_display();
+
+      static uint32_t last_irq = 0, last_sem = 0;
+      last_irq = g_rx_irq_cnt;
+      last_sem = g_rx_sem_cnt;
   }
 }
 

@@ -137,6 +137,14 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
 
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
 
+    /* КРИТИЧНО: без явного разрешения линии в NVIC прерывание от
+       контроллера НИКОГДА не дойдёт до ядра -- HAL_FDCAN_RxFifo0Callback()
+       не вызовется, даже если ActivateNotification() отработал успешно.
+       Раньше это уже терялось при пересборке проекта -- следить, чтобы
+       не пропадало снова. */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
+
   /* USER CODE END FDCAN1_MspInit 1 */
 
   }
@@ -164,6 +172,10 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN FDCAN2_MspInit 1 */
+
+    /* Тот же критичный фикс, что и для FDCAN1 -- см. комментарий выше. */
+    HAL_NVIC_SetPriority(FDCAN2_IT0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(FDCAN2_IT0_IRQn);
 
   /* USER CODE END FDCAN2_MspInit 1 */
   }
@@ -197,6 +209,8 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* hfdcan)
 
   /* USER CODE BEGIN FDCAN1_MspDeInit 1 */
 
+    HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
+
   /* USER CODE END FDCAN1_MspDeInit 1 */
   }
   else if(hfdcan->Instance==FDCAN2)
@@ -217,6 +231,8 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* hfdcan)
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_5|GPIO_PIN_6);
 
   /* USER CODE BEGIN FDCAN2_MspDeInit 1 */
+
+    HAL_NVIC_DisableIRQ(FDCAN2_IT0_IRQn);
 
   /* USER CODE END FDCAN2_MspDeInit 1 */
   }

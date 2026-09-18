@@ -5,9 +5,10 @@
 ../Core/Src/client_handler.c:99:12:ClientHandler_PushCmdToRxRing	7
 ../Core/Src/client_handler.c:132:12:ClientHandler_PopCmdFromRxRing	9
 ../Core/Src/client_handler.c:183:13:ClientHandler_DrainRxCmdsToCore	6
-../Core/Src/client_handler.c:227:6:ClientHandler_InputBytes	7
-../Core/Src/client_handler.c:259:6:ClientHandler_PollTx	16
-../Core/Src/client_handler.c:340:6:ClientHandler_ClientConnected	2
-../Core/Src/client_handler.c:363:6:ClientHandler_ClientDisconnected	2
-../Core/Src/client_handler.c:384:13:ClientHandlerTask	5
-../Core/Src/client_handler.c:420:6:ClientHandlerTask_Start	2
+../Core/Src/client_handler.c:227:10:ClientHandler_RxRingFreeBytes	3
+../Core/Src/client_handler.c:241:6:ClientHandler_InputBytes	7
+../Core/Src/client_handler.c:273:6:ClientHandler_PollTx	16
+../Core/Src/client_handler.c:354:6:ClientHandler_ClientConnected	2
+../Core/Src/client_handler.c:377:6:ClientHandler_ClientDisconnected	2
+../Core/Src/client_handler.c:398:13:ClientHandlerTask	5
+../Core/Src/client_handler.c:434:6:ClientHandlerTask_Start	2

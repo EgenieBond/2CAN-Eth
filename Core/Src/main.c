@@ -762,6 +762,11 @@ void StartDefaultTask(void *argument)
   MX_FDCAN1_Init();
   MX_FDCAN2_Init();
 
+  /* USER CODE BEGIN FDCAN clock debug */
+    DebugUART_Print("[CLOCK] FDCAN kernel clock=%lu Hz\r\n",
+                    (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_FDCAN));
+    /* USER CODE END FDCAN clock debug */
+
 #if CAN_ONLY_DIRECT_TEST
   CanOnlyDirectTest_Run();
 #elif ETH_RAW_LINK_TEST

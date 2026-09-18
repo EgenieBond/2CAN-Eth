@@ -5,9 +5,10 @@
 ../Core/Src/client_handler.c:99:12:ClientHandler_PushCmdToRxRing	56	static
 ../Core/Src/client_handler.c:132:12:ClientHandler_PopCmdFromRxRing	48	static
 ../Core/Src/client_handler.c:183:13:ClientHandler_DrainRxCmdsToCore	120	static
-../Core/Src/client_handler.c:227:6:ClientHandler_InputBytes	40	static
-../Core/Src/client_handler.c:259:6:ClientHandler_PollTx	112	static
-../Core/Src/client_handler.c:340:6:ClientHandler_ClientConnected	24	static
-../Core/Src/client_handler.c:363:6:ClientHandler_ClientDisconnected	24	static
-../Core/Src/client_handler.c:384:13:ClientHandlerTask	32	static
-../Core/Src/client_handler.c:420:6:ClientHandlerTask_Start	48	static
+../Core/Src/client_handler.c:227:10:ClientHandler_RxRingFreeBytes	24	static
+../Core/Src/client_handler.c:241:6:ClientHandler_InputBytes	40	static
+../Core/Src/client_handler.c:273:6:ClientHandler_PollTx	112	static
+../Core/Src/client_handler.c:354:6:ClientHandler_ClientConnected	24	static
+../Core/Src/client_handler.c:377:6:ClientHandler_ClientDisconnected	24	static
+../Core/Src/client_handler.c:398:13:ClientHandlerTask	32	static
+../Core/Src/client_handler.c:434:6:ClientHandlerTask_Start	48	static

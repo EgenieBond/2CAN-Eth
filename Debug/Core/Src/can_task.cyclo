@@ -1,10 +1,10 @@
 ../Core/Src/can_task.c:65:29:ChannelHandle	2
 ../Core/Src/can_task.c:71:15:ChannelIdFromHandle	3
 ../Core/Src/can_task.c:80:12:CanTask_BuildTxHeader	15
-../Core/Src/can_task.c:123:12:CanTask_GetBitTiming	4
-../Core/Src/can_task.c:141:5:CanTask_Open	17
-../Core/Src/can_task.c:274:5:CanTask_Close	4
-../Core/Src/can_task.c:297:13:CanTask	7
-../Core/Src/can_task.c:360:6:CanTask_Start	4
-../Core/Src/can_task.c:392:12:CanTask_FdcanRxToCanFrame	16
-../Core/Src/can_task.c:427:6:HAL_FDCAN_RxFifo0Callback	8
+../Core/Src/can_task.c:123:12:CanTask_GetBitTiming	10
+../Core/Src/can_task.c:157:5:CanTask_Open	17
+../Core/Src/can_task.c:298:5:CanTask_Close	4
+../Core/Src/can_task.c:321:13:CanTask	9
+../Core/Src/can_task.c:421:6:CanTask_Start	4
+../Core/Src/can_task.c:453:12:CanTask_FdcanRxToCanFrame	16
+../Core/Src/can_task.c:488:6:HAL_FDCAN_RxFifo0Callback	8

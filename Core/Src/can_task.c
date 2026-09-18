@@ -127,6 +127,15 @@ static int CanTask_GetBitTiming(uint32_t bitrate_bps, can_bittiming_t *bt)
 
     switch (bitrate_bps)
     {
+        case 125000U:
+            /* Тот же тайминг, что у 500 кбит/с (TQ=100, точка выборки 87%),
+             * только с делителем x4 -- точное значение, без округления. */
+            bt->prescaler = 4; bt->sjw = 13; bt->tseg1 = 86; bt->tseg2 = 13;
+            return 0;
+        case 250000U:
+            /* Тот же тайминг, делитель x2 -- тоже точное значение. */
+            bt->prescaler = 2; bt->sjw = 13; bt->tseg1 = 86; bt->tseg2 = 13;
+            return 0;
         case 500000U:
             bt->prescaler = 1; bt->sjw = 13; bt->tseg1 = 86; bt->tseg2 = 13;
             return 0;
@@ -211,6 +220,14 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
         DebugUART_Print("[CAN] ch%u ERROR: HAL_FDCAN_Init failed\r\n", (unsigned)channel_id);
         return -1;
     }
+
+    DebugUART_Print("[CAN] ch%u NBTP=0x%08lX (prescaler=%lu sjw=%lu tseg1=%lu tseg2=%lu)\r\n",
+                    (unsigned)channel_id,
+                    (unsigned long)hfdcan->Instance->NBTP,
+                    (unsigned long)bt.prescaler,
+                    (unsigned long)bt.sjw,
+                    (unsigned long)bt.tseg1,
+                    (unsigned long)bt.tseg2);
 
     memset(&sFilterConfig, 0, sizeof(sFilterConfig));
     sFilterConfig.IdType = FDCAN_STANDARD_ID;
@@ -310,6 +327,7 @@ static void CanTask(void *argument)
     uint8_t tx_data[8];
 
     uint32_t tx_fifo_full_count = 0;
+    uint32_t tx_fifo_stuck_drop_count = 0;
     uint32_t add_message_fail_count = 0;
 
     DebugUART_Print("[CAN] ch%u CanTask started\r\n", (unsigned)channel_id);
@@ -333,18 +351,55 @@ static void CanTask(void *argument)
 
             memcpy(tx_data, can_msg.frame.Data, can_msg.frame.Size);
 
-            if (HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) == 0U)
+            /* Ждём, пока в аппаратной очереди появится место -- НЕ бросаем
+             * этот конкретный кадр сразу, а ждём и повторяем попытку для
+             * него же. При всплеске отправки очередь на 8 мест может на
+             * мгновение оказаться заполненной -- это нормально.
+             *
+             * НО ждём не бесконечно: если шина ушла в Bus-Off (защитное
+             * отключение CAN при накоплении ошибок передачи) или просто
+             * реально нет партнёра на линии, место может не появиться
+             * никогда -- тогда этот цикл завис бы навсегда и, будучи
+             * задачей с приоритетом выше сетевого стека, мог бы
+             * заблокировать вообще всю плату. Поэтому: жёсткий лимит по
+             * времени (100 мс) и обязательный osDelay(1) внутри, чтобы
+             * не отбирать процессор у остальных задач, пока ждём. */
             {
-                tx_fifo_full_count++;
-                if ((tx_fifo_full_count % 200U) == 0U)
+                uint32_t wait_start = osKernelGetTickCount();
+                uint8_t  give_up = 0;
+
+                while (HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) == 0U)
                 {
-                    DebugUART_Print("[CAN] ch%u ERROR: TX FIFO FULL (count=%lu) TXFQS=0x%08lX PSR=0x%08lX\r\n",
-                                    (unsigned)channel_id,
-                                    (unsigned long)tx_fifo_full_count,
-                                    (unsigned long)hfdcan->Instance->TXFQS,
-                                    (unsigned long)hfdcan->Instance->PSR);
+                    tx_fifo_full_count++;
+
+                    if ((osKernelGetTickCount() - wait_start) > 100U)
+                    {
+                        tx_fifo_stuck_drop_count++;
+                        DebugUART_Print("[CAN] ch%u ERROR: TX FIFO stuck full for 100ms -- "
+                                        "dropping frame (bus-off?) drop_count=%lu PSR=0x%08lX\r\n",
+                                        (unsigned)channel_id,
+                                        (unsigned long)tx_fifo_stuck_drop_count,
+                                        (unsigned long)hfdcan->Instance->PSR);
+                        give_up = 1;
+                        break;
+                    }
+
+                    if ((tx_fifo_full_count % 2000U) == 0U)
+                    {
+                        DebugUART_Print("[CAN] ch%u WARNING: waiting for TX FIFO space (count=%lu) TXFQS=0x%08lX PSR=0x%08lX\r\n",
+                                        (unsigned)channel_id,
+                                        (unsigned long)tx_fifo_full_count,
+                                        (unsigned long)hfdcan->Instance->TXFQS,
+                                        (unsigned long)hfdcan->Instance->PSR);
+                    }
+
+                    osDelay(1);   /* обязательно уступаем процессор другим задачам */
                 }
-                continue;
+
+                if (give_up)
+                {
+                    continue;   /* этот кадр потерян, переходим к следующему из очереди */
+                }
             }
 
             if (HAL_FDCAN_AddMessageToTxFifoQ(hfdcan, &tx_hdr, tx_data) != HAL_OK)
@@ -358,7 +413,6 @@ static void CanTask(void *argument)
                                     (unsigned long)add_message_fail_count,
                                     (unsigned long)err);
                 }
-                continue;
             }
         }
     }

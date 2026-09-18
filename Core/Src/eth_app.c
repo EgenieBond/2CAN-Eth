@@ -21,8 +21,8 @@
 
 #define ETH_TO_CORE_QUEUE_LEN   128
 #define CORE_TO_ETH_QUEUE_LEN   256
-#define CORE_TO_CAN_QUEUE_LEN   64
-#define CAN_TO_CORE_QUEUE_LEN   64
+#define CORE_TO_CAN_QUEUE_LEN   256		//64
+#define CAN_TO_CORE_QUEUE_LEN   256		//64
 
 osMessageQueueId_t eth_to_core_queue = NULL;
 osMessageQueueId_t core_to_eth_queue = NULL;

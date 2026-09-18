@@ -71,7 +71,12 @@ extern "C" {
 #define DEFAULT_TCP_RECVMBOX_SIZE         16
 #define DEFAULT_ACCEPTMBOX_SIZE           8
 #define RECV_BUFSIZE_DEFAULT              2000000000
-#define LWIP_STATS                        0
+
+#define LWIP_STATS                        1					// !!!!
+#define LWIP_STATS_DISPLAY 1
+#define MEM_STATS 1
+#define MEMP_STATS 1
+#define TCP_STATS 1
 
 /* ===== Checksums =====
  * software generation оставляем включённой,

@@ -56,9 +56,20 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 extern FDCAN_HandleTypeDef hfdcan1;
+extern FDCAN_HandleTypeDef hfdcan2;
 void FDCAN1_IT0_IRQHandler(void)
 {
   HAL_FDCAN_IRQHandler(&hfdcan1);
+}
+
+/* КРИТИЧНО: без этого обработчика прерывание с FDCAN2 (после того как
+   NVIC для него разрешён в stm32h7xx_hal_msp.c) попадёт в Default_Handler
+   из таблицы векторов -- т.е. в зависание/бесконечный цикл. Раньше этот
+   обработчик отсутствовал, хотя NVIC для FDCAN2_IT0_IRQn уже включали --
+   такое сочетание особенно опасно, поэтому проверять их только вместе. */
+void FDCAN2_IT0_IRQHandler(void)
+{
+  HAL_FDCAN_IRQHandler(&hfdcan2);
 }
 /* USER CODE END 0 */
 
