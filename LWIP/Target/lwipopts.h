@@ -105,7 +105,7 @@ extern "C" {
 #define IP_ADDR0                          192
 #define IP_ADDR1                          168
 #define IP_ADDR2                          0
-#define IP_ADDR3                          17
+#define IP_ADDR3                          18
 
 #define NETMASK_ADDR0                     255
 #define NETMASK_ADDR1                     255

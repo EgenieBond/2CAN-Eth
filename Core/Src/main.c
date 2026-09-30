@@ -61,6 +61,7 @@ const osThreadAttr_t defaultTask_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
@@ -114,10 +115,6 @@ static void CanOnlyDirectTest_Run(void);
   * @brief  The application entry point.
   * @retval int
   */
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -138,6 +135,9 @@ int main(void)
 
   /* Configure the system clock */
   SystemClock_Config();
+
+  /* Configure the peripherals common clocks (FDCAN via PLL2) */
+  PeriphCommonClock_Config();
 
   /* MPU Configuration -- после установки тактирования --------------------*/
   MPU_Config();
@@ -170,6 +170,17 @@ int main(void)
 /**
   * @brief System Clock Configuration
   * @retval None
+  *
+  * Источник -- HSI (внутренний генератор), а не HSE: на этой плате
+  * выяснилось, что внешнего кварца/генератора на HSE физически нет,
+  * контроллер незаметно переключался на HSI сам. Чтобы это было явным
+  * и предсказуемым, HSE отключён совсем, PLL1 считается от HSI.
+  *
+  * HSI = 64 МГц, но в HAL_RCC_OscConfig ниже HSIState = RCC_HSI_DIV2,
+  * поэтому на вход PLL1 (DIVM1) идёт 32 МГц:
+  *   32 / PLLM(4) = 8 МГц (вход VCO)
+  *   8 × PLLN(100) = 800 МГц (VCO)
+  *   800 / PLLP(2) = 400 МГц = SYSCLK -- та же частота, что была раньше при HSE.
   */
 void SystemClock_Config(void)
 {
@@ -189,18 +200,17 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
-  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV2;
   RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 128;
+  RCC_OscInitStruct.PLL.PLLN = 100;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -221,7 +231,42 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
+  /* FLASH_LATENCY_4 -- обязателен для SYSCLK=400 МГц на VOS1, иначе
+   * ядро читает флеш быстрее, чем она успевает отвечать -- Hard Fault
+   * почти сразу после старта. */
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief Peripherals Common Clock Configuration -- FDCAN через PLL2
+  * @retval None
+  *
+  * Тоже теперь от HSI. Вход на PLL2 после DIVM2(4) = 8 МГц (то же самое
+  * HSI/2, что и на PLL1 выше):
+  *   8 × PLL2N(25) = 200 МГц (VCO)
+  *   200 / PLL2Q(4) = 50 МГц = fdcan_ker_ck -- та же частота, что и
+  *   раньше при HSE, поэтому CanTask_GetBitTiming() в can_task.c
+  *   менять не нужно, все битрейты (125k/250k/500k/800k/1M) остаются
+  *   верными как есть.
+  */
+void PeriphCommonClock_Config(void)
+{
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
+  PeriphClkInitStruct.PLL2.PLL2M = 4;
+  PeriphClkInitStruct.PLL2.PLL2N = 25;
+  PeriphClkInitStruct.PLL2.PLL2P = 2;
+  PeriphClkInitStruct.PLL2.PLL2Q = 4;
+  PeriphClkInitStruct.PLL2.PLL2R = 2;
+  PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_3;
+  PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOWIDE;
+  PeriphClkInitStruct.PLL2.PLL2FRACN = 0;
+  PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_PLL2;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
@@ -766,6 +811,27 @@ void StartDefaultTask(void *argument)
     DebugUART_Print("[CLOCK] FDCAN kernel clock=%lu Hz\r\n",
                     (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_FDCAN));
     /* USER CODE END FDCAN clock debug */
+
+    /* USER CODE BEGIN HSI MCO debug */
+      {
+        GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+
+        // PA8 на Nucleo-H723ZG выведена на разъём CN10, pin 23
+        GPIO_InitStruct.Pin       = GPIO_PIN_8;
+        GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+        GPIO_InitStruct.Pull      = GPIO_NOPULL;
+        GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+        GPIO_InitStruct.Alternate = GPIO_AF0_MCO;
+        HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+        /* Источник HSI  */
+        HAL_RCC_MCOConfig(RCC_MCO1, RCC_MCO1SOURCE_HSI, RCC_MCODIV_1);
+
+        DebugUART_Print("[CLOCK] MCO1 (PA8) configured, source=HSI, div=1 -- measure with scope on CN10 pin23\r\n");
+      }
+      /* USER CODE END HSI MCO debug */
 
 #if CAN_ONLY_DIRECT_TEST
   CanOnlyDirectTest_Run();

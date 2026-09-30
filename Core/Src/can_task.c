@@ -146,8 +146,9 @@ static int CanTask_GetBitTiming(uint32_t bitrate_bps, can_bittiming_t *bt)
              * номинала) -- в пределах обычного допуска CAN. */
             bt->prescaler = 1; bt->sjw = 8; bt->tseg1 = 54; bt->tseg2 = 8;
             return 0;
-        case 1000000U:
-            bt->prescaler = 1; bt->sjw = 1; bt->tseg1 = 48; bt->tseg2 = 1;
+        case 1000000U:      // !
+            //bt->prescaler = 1; bt->sjw = 1; bt->tseg1 = 48; bt->tseg2 = 1;
+        	bt->prescaler = 1; bt->sjw = 1; bt->tseg1 = 48; bt->tseg2 = 1;
             return 0;
         default:
             return -1;
