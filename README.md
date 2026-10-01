@@ -12,3 +12,17 @@
 - добавление нескольких клиентов в проект
 - проверена корректная передача между двумя NETCAN, между STM32 и NETCAN, между двумя STM32
 - проверена поддержка всех стандартных скоростей
+
+## Доп. файлы проекта
+check_2_netcans_simple.ру - скрипт, которым все тестировалось
+замер_скорости.xlsx - таблица замеров скоростей передачи между STM32 и NETCAN
+
+## Используемые версии
+- плата STM32 NUCLEO H723ZG
+- STM32CubeIDE Version: 1.17.0
+- LWIP.Version=v2.1.2_Cube
+- LWIP0.BSP.component=LAN8742
+- Mcu.CPN=STM32H723ZGT6
+- Mcu.IP0=CORTEX_M7
+- MxCube.Version=6.13.0
+- ProjectManager.FirmwarePackage=STM32Cube FW_H7 V1.12.0
