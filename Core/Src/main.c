@@ -290,6 +290,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;  //обычные кадры до 8 байт данных
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL; //режим, можно менять командами O, L, Y
+
   hfdcan1.Init.AutoRetransmission = DISABLE; //повторная передача
   /*
      * если CAN-кадр не был подтверждён на шине,

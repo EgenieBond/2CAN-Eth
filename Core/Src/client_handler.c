@@ -63,6 +63,8 @@ typedef struct
     uint32_t dropped_rx_cmd_ring;
     uint32_t dropped_eth_to_core;
     uint32_t tcp_send_fail_count;
+    uint32_t dropped_cmd_too_long;    /* ClientHandler_PushCmdToRxRing: len >= ETH_CMD_MAX_LEN */
+    uint32_t dropped_line_too_long;   /* ClientHandler_InputBytes: строка длиннее rx_line_buf */
 } client_slot_t;
 
 static client_slot_t g_clients[MAX_CLIENTS];
@@ -103,7 +105,16 @@ static int ClientHandler_PushCmdToRxRing(uint8_t id, const char *cmd)
 
     if (cmd == NULL) { return -1; }
     len = strlen(cmd);
-    if ((len == 0U) || (len >= ETH_CMD_MAX_LEN)) { return -2; }
+    if (len == 0U) { return -2; }
+    if (len >= ETH_CMD_MAX_LEN)
+    {
+        c->dropped_cmd_too_long++;
+        DebugUART_Print("[CLIENT] id=%u ch%u ERROR: cmd too long (len=%lu >= %u), dropped, total=%lu\r\n",
+                        (unsigned)id, (unsigned)c->channel_id,
+                        (unsigned long)len, (unsigned)ETH_CMD_MAX_LEN,
+                        (unsigned long)c->dropped_cmd_too_long);
+        return -2;
+    }
 
     osKernelLock();
 
@@ -111,7 +122,11 @@ static int ClientHandler_PushCmdToRxRing(uint8_t id, const char *cmd)
     {
         osKernelUnlock();
         c->dropped_rx_cmd_ring++;
-        if ((c->dropped_rx_cmd_ring % 100U) == 0U)
+        /* Первый же дроп печатаем сразу -- порог "раз в 100" удобен при
+         * массовом переполнении, но единичную редкую потерю (ровно наш
+         * случай -- 1 кадр за весь прогон) с таким порогом в лог
+         * вообще никогда не попал бы. */
+        if ((c->dropped_rx_cmd_ring == 1U) || ((c->dropped_rx_cmd_ring % 100U) == 0U))
         {
             DebugUART_Print("[CLIENT] id=%u ch%u RX cmd ring drops=%lu used=%lu free=%lu\r\n",
                             (unsigned)id, (unsigned)c->channel_id,
@@ -210,7 +225,10 @@ static void ClientHandler_DrainRxCmdsToCore(uint8_t id)
             c->pending_cmd_valid = 1;
             c->dropped_eth_to_core++;
 
-            if ((c->dropped_eth_to_core % 1000U) == 0U)
+            /* Та же логика: первая потеря -- сразу в лог, дальше не
+             * чаще раза в 1000, чтобы не захлёстывать UART при
+             * длительном заторе. */
+            if ((c->dropped_eth_to_core == 1U) || ((c->dropped_eth_to_core % 1000U) == 0U))
             {
                 DebugUART_Print("[CLIENT] id=%u ch%u eth_to_core full count=%lu rx_used=%lu\r\n",
                                 (unsigned)id, (unsigned)c->channel_id,
@@ -257,6 +275,12 @@ void ClientHandler_InputBytes(uint8_t client_id, const uint8_t *data, size_t len
         }
         else
         {
+            c->dropped_line_too_long++;
+            DebugUART_Print("[CLIENT] id=%u ch%u ERROR: input line too long (>%u bytes), "
+                            "line dropped, total=%lu\r\n",
+                            (unsigned)client_id, (unsigned)c->channel_id,
+                            (unsigned)(CLIENT_RX_BUFFER_SIZE - 1U),
+                            (unsigned long)c->dropped_line_too_long);
             c->rx_line_pos = 0;
             continue;
         }
@@ -368,6 +392,11 @@ void ClientHandler_ClientConnected(uint8_t client_id, uint8_t channel_id)
     c->pending_cmd_valid = 0;
     c->tx_len            = 0;
     c->channel_id        = channel_id;
+    c->dropped_rx_cmd_ring  = 0;
+    c->dropped_eth_to_core  = 0;
+    c->dropped_cmd_too_long = 0;
+    c->dropped_line_too_long = 0;
+    c->tcp_send_fail_count  = 0;
     c->in_use            = 1;
 
     DebugUART_Print("[CLIENT] id=%u ch%u connected, slot reset\r\n",
@@ -393,6 +422,14 @@ void ClientHandler_ClientDisconnected(uint8_t client_id)
     c->in_use            = 0;
 
     DebugUART_Print("[CLIENT] id=%u disconnected, slot freed\r\n", (unsigned)client_id);
+    DebugUART_Print("[CLIENT] id=%u drop stats: rx_cmd_ring=%lu eth_to_core=%lu "
+                    "cmd_too_long=%lu line_too_long=%lu tcp_send_fail=%lu\r\n",
+                    (unsigned)client_id,
+                    (unsigned long)c->dropped_rx_cmd_ring,
+                    (unsigned long)c->dropped_eth_to_core,
+                    (unsigned long)c->dropped_cmd_too_long,
+                    (unsigned long)c->dropped_line_too_long,
+                    (unsigned long)c->tcp_send_fail_count);
 }
 
 static void ClientHandlerTask(void *argument)

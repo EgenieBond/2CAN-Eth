@@ -1,7 +1,5 @@
 /*
  * can_task.c
- *
- *  Created on: Mar 10, 2026
  *      Author: Egenie
  *
  *  Обновлено: поддержка ДВУХ независимых физических CAN-каналов
@@ -23,6 +21,7 @@
 #include "debug_uart.h"
 #include "can_types.h"
 #include "main.h"
+#include "raw_tcp_server.h"   /* RawTcpServer_NotifyChannelDrained() -- страховка TCP backpressure */
 
 #include <string.h>
 #include <stdint.h>
@@ -47,12 +46,20 @@ typedef struct
     volatile uint32_t rx_irq_count;
     volatile uint32_t rx_ok_count;
     volatile uint32_t rx_queue_drop_count;
+
+    /* TX-статистика, видимая вне CanTask() (для сводки в CanTask_Close) --
+     * раньше эти три счётчика были чисто локальными переменными внутри
+     * CanTask() и обнулялись при каждом переоткрытии канала, поэтому их
+     * нельзя было напечатать при закрытии. */
+    volatile uint32_t tx_fifo_full_count;
+    volatile uint32_t tx_fifo_stuck_drop_count;
+    volatile uint32_t add_message_fail_count;
 } can_channel_ctx_t;
 
 static can_channel_ctx_t g_channels[NUM_CHANNELS] =
 {
-    { NULL, NULL, 0, 0, 0, 0 },   /* канал 0 -- заполнится &hfdcan1 в CanTask_Start */
-    { NULL, NULL, 0, 0, 0, 0 },   /* канал 1 -- заполнится &hfdcan2 в CanTask_Start */
+    { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 },   /* канал 0 -- заполнится &hfdcan1 в CanTask_Start */
+    { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 },   /* канал 1 -- заполнится &hfdcan2 в CanTask_Start */
 };
 
 static int CanTask_BuildTxHeader(const can_frame_t *frame, FDCAN_TxHeaderTypeDef *hdr);
@@ -210,7 +217,8 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
     {
         case CORE_CAN_MODE_NORMAL:         hfdcan->Init.Mode = FDCAN_MODE_NORMAL; break;
         case CORE_CAN_MODE_LISTEN_ONLY:     hfdcan->Init.Mode = FDCAN_MODE_BUS_MONITORING; break;
-        case CORE_CAN_MODE_SELF_RECEPTION:  hfdcan->Init.Mode = FDCAN_MODE_INTERNAL_LOOPBACK; break;
+        case CORE_CAN_MODE_SELF_RECEPTION:  hfdcan->Init.Mode = FDCAN_MODE_EXTERNAL_LOOPBACK; break;
+
         default:
             DebugUART_Print("[CAN] ch%u ERROR: invalid mode in CanTask_Open\r\n", (unsigned)channel_id);
             return -1;
@@ -286,6 +294,9 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
     g_channels[channel_id].rx_irq_count = 0;
     g_channels[channel_id].rx_ok_count = 0;
     g_channels[channel_id].rx_queue_drop_count = 0;
+    g_channels[channel_id].tx_fifo_full_count = 0;
+    g_channels[channel_id].tx_fifo_stuck_drop_count = 0;
+    g_channels[channel_id].add_message_fail_count = 0;
 
     DebugUART_Print("[CAN] ch%u RX notification active\r\n", (unsigned)channel_id);
     DebugUART_Print("[CAN] ch%u channel opened, mode=%lu bitrate=%lu bit/s\r\n",
@@ -316,6 +327,30 @@ int CanTask_Close(uint8_t channel_id)
 
     g_channels[channel_id].started = 0;
     DebugUART_Print("[CAN] ch%u channel stopped\r\n", (unsigned)channel_id);
+
+    /* Сводка по приёму за время, пока канал был открыт -- безопасно
+     * печатать здесь (обычный контекст задачи, не прерывание). Если
+     * rx_queue_drop > 0 -- значит can_to_core_queue реально переполнялась
+     * и часть принятых кадров была молча потеряна в
+     * HAL_FDCAN_RxFifo0Callback() (там логировать нельзя -- ISR). */
+    DebugUART_Print("[CAN] ch%u RX stats: irq=%lu ok=%lu queue_drop=%lu\r\n",
+                    (unsigned)channel_id,
+                    (unsigned long)g_channels[channel_id].rx_irq_count,
+                    (unsigned long)g_channels[channel_id].rx_ok_count,
+                    (unsigned long)g_channels[channel_id].rx_queue_drop_count);
+
+    /* TX-сторона: tx_fifo_full -- сколько раз вообще приходилось ждать
+     * место в TX FIFO (это нормально при всплесках, не ошибка само по
+     * себе); stuck_drop -- сколько кадров реально потеряно по таймауту
+     * 100мс; add_message_fail -- сколько раз сам HAL_FDCAN_AddMessageToTxFifoQ
+     * отказался добавить кадр (именно это оказалось причиной потери
+     * одного кадра на границе count=292/293). */
+    DebugUART_Print("[CAN] ch%u TX stats: fifo_full_waits=%lu stuck_drop=%lu add_message_fail=%lu\r\n",
+                    (unsigned)channel_id,
+                    (unsigned long)g_channels[channel_id].tx_fifo_full_count,
+                    (unsigned long)g_channels[channel_id].tx_fifo_stuck_drop_count,
+                    (unsigned long)g_channels[channel_id].add_message_fail_count);
+
     return 0;
 }
 
@@ -327,9 +362,7 @@ static void CanTask(void *argument)
     FDCAN_TxHeaderTypeDef tx_hdr;
     uint8_t tx_data[8];
 
-    uint32_t tx_fifo_full_count = 0;
-    uint32_t tx_fifo_stuck_drop_count = 0;
-    uint32_t add_message_fail_count = 0;
+    uint32_t last_rx_queue_drop_count = 0;   /* для мгновенного оповещения о молчаливых потерях RX */
 
     DebugUART_Print("[CAN] ch%u CanTask started\r\n", (unsigned)channel_id);
     DebugUART_Print("[CAN] ch%u core_to_can_queue=%p can_to_core_queue=%p\r\n",
@@ -341,6 +374,30 @@ static void CanTask(void *argument)
     {
         if (osMessageQueueGet(core_to_can_queues[channel_id], &can_msg, NULL, osWaitForever) == osOK)
         {
+            /* Кадр забрали из очереди -- там освободился слот. Если
+             * TCP придерживал ACK клиентам этого канала из-за
+             * переполнения (RX backpressure в raw_tcp_server.c),
+             * сейчас самое время проверить, не открылось ли снова
+             * место, и, если да, отпустить накопившиеся данные. */
+            RawTcpServer_NotifyChannelDrained(channel_id);
+
+            /* Проверка молчаливых потерь на приёме: HAL_FDCAN_RxFifo0Callback()
+             * сам напечатать ничего не может (это прерывание, там есть
+             * ограничение на DebugUART_Print), но увеличивает
+             * rx_queue_drop_count, если can_to_core_queue этого канала
+             * была полна в момент приёма кадра. Здесь, в обычном
+             * контексте задачи, безопасно сравнить счётчик с прошлым
+             * разом и сразу сообщить, если он вырос -- не дожидаясь
+             * закрытия канала. */
+            if (g_channels[channel_id].rx_queue_drop_count != last_rx_queue_drop_count)
+            {
+                last_rx_queue_drop_count = g_channels[channel_id].rx_queue_drop_count;
+                DebugUART_Print("[CAN] ch%u ERROR: can_to_core_queue FULL -- RX frame(s) silently "
+                                "dropped in ISR, total=%lu\r\n",
+                                (unsigned)channel_id,
+                                (unsigned long)last_rx_queue_drop_count);
+            }
+
             memset(&tx_hdr, 0, sizeof(tx_hdr));
             memset(tx_data, 0, sizeof(tx_data));
 
@@ -371,25 +428,25 @@ static void CanTask(void *argument)
 
                 while (HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) == 0U)
                 {
-                    tx_fifo_full_count++;
+                    g_channels[channel_id].tx_fifo_full_count++;
 
                     if ((osKernelGetTickCount() - wait_start) > 100U)
                     {
-                        tx_fifo_stuck_drop_count++;
+                        g_channels[channel_id].tx_fifo_stuck_drop_count++;
                         DebugUART_Print("[CAN] ch%u ERROR: TX FIFO stuck full for 100ms -- "
                                         "dropping frame (bus-off?) drop_count=%lu PSR=0x%08lX\r\n",
                                         (unsigned)channel_id,
-                                        (unsigned long)tx_fifo_stuck_drop_count,
+                                        (unsigned long)g_channels[channel_id].tx_fifo_stuck_drop_count,
                                         (unsigned long)hfdcan->Instance->PSR);
                         give_up = 1;
                         break;
                     }
 
-                    if ((tx_fifo_full_count % 2000U) == 0U)
+                    if ((g_channels[channel_id].tx_fifo_full_count % 2000U) == 0U)
                     {
                         DebugUART_Print("[CAN] ch%u WARNING: waiting for TX FIFO space (count=%lu) TXFQS=0x%08lX PSR=0x%08lX\r\n",
                                         (unsigned)channel_id,
-                                        (unsigned long)tx_fifo_full_count,
+                                        (unsigned long)g_channels[channel_id].tx_fifo_full_count,
                                         (unsigned long)hfdcan->Instance->TXFQS,
                                         (unsigned long)hfdcan->Instance->PSR);
                     }
@@ -405,14 +462,26 @@ static void CanTask(void *argument)
 
             if (HAL_FDCAN_AddMessageToTxFifoQ(hfdcan, &tx_hdr, tx_data) != HAL_OK)
             {
-                add_message_fail_count++;
-                if ((add_message_fail_count % 200U) == 0U)
+                g_channels[channel_id].add_message_fail_count++;
+
+                /* Раньше печаталась только КАЖДАЯ 200-я ошибка -- удобно
+                 * при массовом сбое, но единичный редкий провал (ровно
+                 * такой, какой мы ловим: 1 кадр потерян за весь прогон)
+                 * с таким порогом вообще никогда не попадал бы в лог.
+                 * Печатаем теперь первую ошибку сразу, а дальше -- не
+                 * чаще раза в 200, чтобы не захлёстывать UART при
+                 * массовом сбое (bus-off и т.п.). */
+                if ((g_channels[channel_id].add_message_fail_count == 1U) ||
+                    ((g_channels[channel_id].add_message_fail_count % 200U) == 0U))
                 {
                     uint32_t err = HAL_FDCAN_GetError(hfdcan);
-                    DebugUART_Print("[CAN] ch%u ERROR: AddMessageToTxFifoQ failed (count=%lu) err=0x%08lX\r\n",
+                    DebugUART_Print("[CAN] ch%u ERROR: AddMessageToTxFifoQ failed (count=%lu) "
+                                    "err=0x%08lX TXFQS=0x%08lX PSR=0x%08lX\r\n",
                                     (unsigned)channel_id,
-                                    (unsigned long)add_message_fail_count,
-                                    (unsigned long)err);
+                                    (unsigned long)g_channels[channel_id].add_message_fail_count,
+                                    (unsigned long)err,
+                                    (unsigned long)hfdcan->Instance->TXFQS,
+                                    (unsigned long)hfdcan->Instance->PSR);
                 }
             }
         }

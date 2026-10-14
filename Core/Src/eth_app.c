@@ -12,6 +12,19 @@
  *
  *  Обновлено: core_to_can_queue/can_to_core_queue -- теперь массивы,
  *  по паре на каждый физический CAN-канал (NUM_CHANNELS из app_queues.h).
+ *
+ *  Обновлено ещё раз: ETH_TO_CORE_QUEUE_LEN увеличена со 128 до 512.
+ *  Причина: при нагрузочном тесте (burst ~290+ кадров подряд) эта
+ *  очередь оказалась самым узким местом всего конвейера -- она
+ *  переполнялась ДО того, как успевала заполниться любая другая
+ *  (core_to_can_queue/can_to_core_queue -- по 256), и переполнение
+ *  было полностью не видно в логе, пока не добавили счётчики в
+ *  client_handler.c. Итог: ClientHandler_DrainRxCmdsToCore() упиралась
+ *  в полную eth_to_core_queue, переставала вычитывать свой rx_cmd_ring,
+ *  и при достаточно длинном заторе кольцо клиента (8 КБ) тоже
+ *  переполнялось и теряло ровно 1 кадр -- картина, которую мы видели:
+ *  292/293 доставлено, остальное -- зависание до таймаута теста.
+ *  512 слотов * 66 байт/слот = ~34 КБ RAM -- платой легко потянется.
  */
 
 #include "eth_app.h"
@@ -19,7 +32,7 @@
 #include "client_handler.h"
 #include "debug_uart.h"
 
-#define ETH_TO_CORE_QUEUE_LEN   128
+#define ETH_TO_CORE_QUEUE_LEN   512		//было 128 -- см. комментарий выше
 #define CORE_TO_ETH_QUEUE_LEN   256
 #define CORE_TO_CAN_QUEUE_LEN   256		//64
 #define CAN_TO_CORE_QUEUE_LEN   256		//64
