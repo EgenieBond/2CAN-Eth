@@ -10,8 +10,8 @@ from vs_can_lib import VSCAN, VSCAN_SPEED_1M, VSCAN_SPEED_125K, VSCAN_SPEED_250K
 # ============================================================
 #                        НАСТРОЙКИ
 # ============================================================
-NETCAN_ADDR_1 = "192.168.0.17:2001"
-NETCAN_ADDR_2 = "192.168.0.18:2001"
+NETCAN_ADDR_1 = "192.168.0.18:2001"
+NETCAN_ADDR_2 = "192.168.0.18:2002"
 CANABLE_PORT = "COM8"                  # COM-порт адаптера CANable
 
 MSG_DATA_SIZE = 8          # размер данных в одном CAN-кадре, байт
@@ -343,36 +343,83 @@ def test_canable(speed_kbit=1000, reverse=False, count=MSG_COUNT, timeout=5, add
 # ============================================================
 #                   НАГРУЗОЧНЫЙ ТЕСТ
 # ============================================================
-def _load_pass(bus_send, bus_recv, speed, count, timeout):
+def _load_pass(bus_send, bus_recv, speed, count, timeout, duration=None):
     """
-    Один прогон нагрузочного теста: шлёт count кадров разом через bus_send,
-    ждёт их на bus_recv (не дольше timeout с) и меряет время передачи.
+    Один прогон нагрузочного теста. Два режима:
 
-    Возвращает (pps, kbps, received, ok):
-      pps      -- пакетов в секунду
-      kbps     -- килобайт в секунду
-      received -- сколько кадров реально дошло
-      ok       -- True, если дошли все count кадров и совпали побайтово
+    duration=None (по умолчанию, как раньше) -- одноразовый "залп": шлёт
+    count кадров разом через bus_send, ждёт их на bus_recv (не дольше
+    timeout с) и меряет время передачи этой ОДНОЙ пачки. Это измеряет,
+    сколько влезает в один burst -- не то же самое, что устойчивая
+    (sustained) скорость в установившемся режиме.
+
+    duration=<секунды> -- вместо одного залпа гонит пачки по count кадров
+    подряд, одну за другой, без пауз между ними, пока не наберётся
+    duration секунд суммарного времени, и считает pps/kbps по ВСЕМ пачкам
+    сразу. Это и есть устойчивая скорость -- к ней в итоге и сходится
+    система при долгой непрерывной нагрузке, в отличие от предела одного
+    мгновенного burst'а.
+
+      bus_send -- откуда отправляем
+      bus_recv -- куда должно прийти
+      speed    -- битрейт, Кбит/с (только для печати)
+      count    -- размер одной пачки кадров
+      timeout  -- сколько секунд ждать приёма ОДНОЙ пачки
+      duration -- если задано (сек) -- суммарная длительность всего
+                  прогона; если None -- одна пачка и выход (старое
+                  поведение, полностью совместимо с прежними вызовами)
+
+    Возвращает (pps, kbps, received, ok) -- как и раньше. При duration
+    received -- сумма по всем пачкам, pps/kbps посчитаны по суммарному
+    времени всего прогона, а не одной пачки; ok становится False сразу,
+    как только хоть одна пачка внутри прогона потеряется или не совпадёт
+    (дальше прогон останавливается -- это и есть найденный предел
+    устойчивой нагрузки).
     """
-    send_msgs = [VSCAN.form_message(TEST_CAN_ID, random.randbytes(MSG_DATA_SIZE)) for _ in range(count)]
-    print(f"{bus_send.port_com} -> {bus_recv.port_com}  {count} кадров, {speed} Kbit/s")
+    if duration is None:
+        send_msgs = [VSCAN.form_message(TEST_CAN_ID, random.randbytes(MSG_DATA_SIZE)) for _ in range(count)]
+        print(f"{bus_send.port_com} -> {bus_recv.port_com}  {count} кадров, {speed} Kbit/s")
 
-    # засекаем время только вокруг самой передачи -- формирование
-    # кадров выше в расчёт не идёт, оно не часть скорости канала
-    t0 = time.perf_counter()
-    bus_send.write_mes_s(send_msgs)
-    recv_msgs = read_messages(bus_recv, count, timeout)
-    t1 = time.perf_counter()
+        # засекаем время только вокруг самой передачи -- формирование
+        # кадров выше в расчёт не идёт, оно не часть скорости канала
+        t0 = time.perf_counter()
+        bus_send.write_mes_s(send_msgs)
+        recv_msgs = read_messages(bus_recv, count, timeout)
+        t1 = time.perf_counter()
 
-    dt = t1 - t0
-    received = len(recv_msgs)
-    pps = received / dt if dt > 0 else 0.0
-    kbps = received * MSG_DATA_SIZE / 1024 / dt if dt > 0 else 0.0
-    ok = received == count and recv_msgs == send_msgs
+        dt = t1 - t0
+        received = len(recv_msgs)
+        pps = received / dt if dt > 0 else 0.0
+        kbps = received * MSG_DATA_SIZE / 1024 / dt if dt > 0 else 0.0
+        ok = received == count and recv_msgs == send_msgs
+    else:
+        print(f"{bus_send.port_com} -> {bus_recv.port_com}  устойчивая нагрузка "
+              f"{duration:.1f} с, пачками по {count} кадров, {speed} Kbit/s")
+
+        total_received = 0
+        ok = True
+        t_start = time.perf_counter()
+
+        while (time.perf_counter() - t_start) < duration:
+            send_msgs = [VSCAN.form_message(TEST_CAN_ID, random.randbytes(MSG_DATA_SIZE)) for _ in range(count)]
+            bus_send.write_mes_s(send_msgs)
+            recv_msgs = read_messages(bus_recv, count, timeout)
+            total_received += len(recv_msgs)
+
+            if len(recv_msgs) != count or recv_msgs != send_msgs:
+                ok = False
+                print(f"<Error> Пачка потеряна/не совпала (принято {len(recv_msgs)} из {count}) "
+                      f"-- прерываю устойчивый прогон")
+                break
+
+        dt = time.perf_counter() - t_start
+        received = total_received
+        pps = received / dt if dt > 0 else 0.0
+        kbps = received * MSG_DATA_SIZE / 1024 / dt if dt > 0 else 0.0
 
     print(f"Время: {dt:.4f} с")
     print(f"Скорость: {pps:.1f} пакет/с, {kbps:.2f} КБ/с")
-    print(f"Доставлено: {received} из {count}")
+    print(f"Доставлено: {received}" + (f" из {count}" if duration is None else " (суммарно)"))
     if ok:
         print("Все кадры дошли и совпадают побайтово -- OK")
     elif received:
@@ -441,40 +488,68 @@ def test_load(addr1=None, addr2=None, speeds=None, reverse=False, count=100, tim
 #          ПОИСК МАКСИМАЛЬНОЙ ПРОПУСКНОЙ СПОСОБНОСТИ
 # ============================================================
 def test_find_max_throughput(addr1=None, addr2=None, speed=1000, reverse=False,
-                             counts=None, timeout=10):
+                             loopback=False, counts=None, timeout=10, sustain_s=None):
     """
     Находит практический предел: на заданной скорости шины (speed) постепенно
     увеличивает количество кадров в одной пачке (count) и смотрит, на каком
     объёме начинаются потери. Останавливается на первой неудаче -- дальше
     только хуже, повторять нет смысла.
 
-      addr1/addr2 -- адреса двух устройств
+    Два режима подключения (как в test_one_direction):
+    loopback=False (по умолчанию) -- между двумя устройствами (addr1 <-> addr2).
+    loopback=True -- одно устройство (addr1) в режиме self-reception, шлёт
+                     само себе и сама же принимает (addr2 в этом режиме не
+                     используется).
+
+      addr1/addr2 -- адреса устройств; при loopback=True используется
+                     только addr1 (для канала FDCAN2 передай
+                     addr1="192.168.0.17:2002")
       speed       -- битрейт шины, Кбит/с, на котором ищем предел
-      reverse     -- False: addr1 -> addr2, True: addr2 -> addr1
+      reverse     -- используется только при loopback=False:
+                     False: addr1 -> addr2, True: addr2 -> addr1
+      loopback    -- True: проверка одного устройства самого на себя
       counts      -- список размеров пачки кадров, по возрастанию;
                      по умолчанию [10, 50, 100, 250, 500, 1000, 2000, 5000]
       timeout     -- сколько секунд ждать приёма каждой пачки
+      sustain_s   -- если задано (сек): после того, как найден last_good
+                     (максимальный размер пачки, прошедший без потерь),
+                     дополнительно прогоняет именно его в РЕЖИМЕ УСТОЙЧИВОЙ
+                     нагрузки (пачки по last_good кадров подряд, без пауз,
+                     в течение sustain_s секунд) -- это проверяет, держит ли
+                     плата найденный предел не только на одном коротком
+                     burst'е, а и в установившемся непрерывном потоке.
+                     Если None (по умолчанию) -- эта проверка не делается,
+                     поведение полностью как раньше.
 
     В конце печатает таблицу всех прогонов и вывод: последний count,
     на котором всё прошло без потерь -- это и есть практический максимум
     для данного тракта (плата + TCP/SLCAN + ПК), а не предел самой шины.
+    Если задан sustain_s -- следом печатает результат устойчивой проверки.
     """
     addr1 = addr1 or NETCAN_ADDR_1
     addr2 = addr2 or NETCAN_ADDR_2
     counts = counts or [10, 50, 100, 250, 500, 1000, 2000, 5000]
 
-    print(f"Поиск максимальной пропускной способности на {speed} Kbit/s")
+    print(f"Поиск максимальной пропускной способности на {speed} Kbit/s"
+          + (" (loopback)" if loopback else ""))
     print(f"Пробуем размеры пачки: {counts}")
     results = []   # (count, пакет/с, КБ/с, доставлено, прошло ли)
     last_good = None
 
-    # канал открывается один раз и держится открытым на всю серию --
+    # канал(ы) открываются один раз и держатся открытыми на всю серию --
     # так измеряется именно рост нагрузки, без лишних переоткрытий
-    with VSCAN(addr1, emulation=EMU) as bus1, VSCAN(addr2, emulation=EMU) as bus2:
-        bus1.set_speed(SPEED_ENUM[speed])
-        bus2.set_speed(SPEED_ENUM[speed])
-        bus_send, bus_recv = (bus2, bus1) if reverse else (bus1, bus2)
-        time.sleep(PAUSE_S)   # дать обоим устройствам встать на шину
+    with ExitStack() as stack:
+        if loopback:
+            bus1 = stack.enter_context(VSCAN(addr1, mode=VSCAN_MODE_SELF_RECEPTION, emulation=EMU))
+            bus1.set_speed(SPEED_ENUM[speed])
+            bus_send = bus_recv = bus1
+        else:
+            bus1 = stack.enter_context(VSCAN(addr1, emulation=EMU))
+            bus2 = stack.enter_context(VSCAN(addr2, emulation=EMU))
+            bus1.set_speed(SPEED_ENUM[speed])
+            bus2.set_speed(SPEED_ENUM[speed])
+            bus_send, bus_recv = (bus2, bus1) if reverse else (bus1, bus2)
+        time.sleep(PAUSE_S)   # дать устройству(ам) встать на шину
 
         for count in counts:
             print(f"########## count = {count} ##########")
@@ -509,6 +584,40 @@ def test_find_max_throughput(addr1=None, addr2=None, speed=1000, reverse=False,
               f"(~{best_pps:.0f} пакет/с на {speed} Kbit/s)")
     print()
 
+    # ---------- проверка на устойчивую (sustained) нагрузку ----------
+    if sustain_s is not None and last_good is not None:
+        print("=" * 60)
+        print(f"ПРОВЕРКА УСТОЙЧИВОЙ НАГРУЗКИ (count={last_good}, {sustain_s:.0f} с)")
+        print("=" * 60)
+
+        # канал(ы) открываются заново -- отдельный, чистый прогон
+        with ExitStack() as stack:
+            if loopback:
+                bus1 = stack.enter_context(VSCAN(addr1, mode=VSCAN_MODE_SELF_RECEPTION, emulation=EMU))
+                bus1.set_speed(SPEED_ENUM[speed])
+                bus_send = bus_recv = bus1
+            else:
+                bus1 = stack.enter_context(VSCAN(addr1, emulation=EMU))
+                bus2 = stack.enter_context(VSCAN(addr2, emulation=EMU))
+                bus1.set_speed(SPEED_ENUM[speed])
+                bus2.set_speed(SPEED_ENUM[speed])
+                bus_send, bus_recv = (bus2, bus1) if reverse else (bus1, bus2)
+            time.sleep(PAUSE_S)   # дать устройству(ам) встать на шину
+
+            sus_pps, sus_kbps, sus_received, sus_ok = _load_pass(
+                bus_send, bus_recv, speed, last_good, timeout, duration=sustain_s)
+
+        if sus_ok:
+            print(f"\nУстойчивая скорость подтверждена: ~{sus_pps:.0f} пакет/с "
+                  f"({sus_kbps:.2f} КБ/с) непрерывно в течение {sustain_s:.0f} с "
+                  f"на count={last_good}, на {speed} Kbit/s")
+        else:
+            print(f"\n<Внимание> На устойчивой нагрузке (count={last_good}) потери "
+                  f"всё же появились -- практический устойчивый максимум ниже, чем "
+                  f"{last_good}, найденный короткими пачками. Полученная за это время "
+                  f"скорость: ~{sus_pps:.0f} пакет/с ({sus_kbps:.2f} КБ/с)")
+        print()
+
 # ============================================================
 #                           MAIN
 # ============================================================
@@ -523,7 +632,7 @@ if __name__ == "__main__":
         test_one_direction(speed=1000, reverse=False, repeat=False, verbose=True)
     '''
 
-    # test_one_direction(speed=1000, loopback=False, repeat=True, verbose=True)
+    test_one_direction(speed=1000, loopback=False, repeat=False, verbose=True)
 
     # Сбросить оба канала одним вызовом (закрыть-переоткрыть каждый):
     # reset_all_channels()
@@ -539,9 +648,9 @@ if __name__ == "__main__":
 
     # Нагрузочный тест по всем скоростям (сводная таблица в конце):
     # отправка всех count кадров разом
-    test_load(reverse=False, count=100)
+    # test_load(reverse=False, count=100)
     # test_load(speeds=[125, 500], reverse=False, count=100)
 
     # Поиск максимальной пропускной способности
     # test_find_max_throughput(speed=1000, reverse=False)
-    # test_find_max_throughput(speed=1000, reverse=False, counts=[10000, 15000, 18500, 20000])
+    test_find_max_throughput(speed=1000, reverse=False, counts=[300], loopback=False, sustain_s=4800)
