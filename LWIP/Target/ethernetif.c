@@ -1051,10 +1051,21 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
         slot->busy = 0;
         g_TxPoolHead = (g_TxPoolHead + ETH_TX_POOL_SIZE - 1U) % ETH_TX_POOL_SIZE;
         g_tx_submit_fail_cnt++;
-        DebugUART_Print("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX\r\n",
+
+        /* Расширенная диагностика: смотрим РЕАЛЬНОЕ число занятых
+         * аппаратных TX-дескрипторов DMA (buf_in_use, максимум =
+         * ETH_TX_DESC_CNT) и состояние RX-пула буферов в тот же
+         * момент -- чтобы понять, застревает ли именно TX-кольцо,
+         * или первопричина -- исчерпание RX-буферов (RBU), которое
+         * тянет TX за собой. */
+        DebugUART_Print("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX "
+                        "buf_in_use=%lu rx_alloc_ok=%lu rx_alloc_fail=%lu\r\n",
                         (int)st,
                         (unsigned long)HAL_ETH_GetError(&heth),
-                        (unsigned long)HAL_ETH_GetDMAError(&heth));
+                        (unsigned long)HAL_ETH_GetDMAError(&heth),
+                        (unsigned long)heth.TxDescList.BuffersInUse,
+                        (unsigned long)g_rx_alloc_ok_cnt,
+                        (unsigned long)g_rx_alloc_fail_cnt);
 #if ETH_PAD_SIZE
         pbuf_header(p, ETH_PAD_SIZE);
 #endif

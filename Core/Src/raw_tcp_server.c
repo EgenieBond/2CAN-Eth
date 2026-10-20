@@ -49,16 +49,18 @@ typedef struct
     uint32_t tx_drop_count;
     uint32_t tcp_err_mem_count;
 
-    /* RX backpressure ("страховка"): если core_to_can_queue канала,
-     * к которому привязан этот клиент, почти заполнена -- CAN не
-     * успевает забирать кадры быстрее, чем клиент их шлёт. В этом
-     * случае очередной принятый pbuf временно откладывается сюда и НЕ
-     * подтверждается клиенту (tcp_recved() не вызывается) -- поэтому
-     * TCP receive window для этого соединения перестаёт расти, и
-     * клиентский TCP-стек сам снижает скорость отправки. Как только в
-     * очереди канала снова появляется место (см.
-     * RawTcpServer_NotifyChannelDrained), отложенный pbuf
-     * обрабатывается и наконец подтверждается. */
+    /* RX backpressure ("страховка"): если буферы конвейера этого
+     * клиента/канала подходят к концу -- принимаем из входящего pbuf'а
+     * ТОЛЬКО СТОЛЬКО, сколько реально есть места ПРЯМО СЕЙЧАС (см.
+     * RawTcp_ClientAcceptableBytes), а остаток откладываем сюда и НЕ
+     * подтверждаем клиенту (tcp_recved() для него не зовём) -- поэтому
+     * TCP receive window для этого соединения сужается РОВНО настолько,
+     * насколько у нас реально кончилось место, а не падает в ноль при
+     * первом же признаке тесноты. Клиентский TCP-стек видит суженное
+     * окно и сам снижает скорость отправки, но не останавливается
+     * совсем, пока окно не схлопнулось полностью. Как только в буферах
+     * снова появляется место (см. RawTcpServer_NotifyChannelDrained),
+     * отложенный остаток дообрабатывается -- тоже, возможно, частями. */
     struct pbuf *rx_pending;
 } tcp_client_t;
 
@@ -99,7 +101,7 @@ static int RawTcp_TxPush(uint8_t id, const uint8_t *data, size_t len)
     {
         osKernelUnlock();
         c->tx_drop_count++;
-        if ((c->tx_drop_count % 100U) == 0U)
+        if ((c->tx_drop_count == 1U) || ((c->tx_drop_count % 100U) == 0U))
         {
             DebugUART_Print("[TCP] id=%u TX ring drops=%lu\r\n",
                             (unsigned)id, (unsigned long)c->tx_drop_count);
@@ -199,13 +201,34 @@ static void RawTcp_ScheduleFlush(uint8_t id)
     }
 }
 
-/* ===== RX BACKPRESSURE ("страховка": CAN не успевает -- тормозим TCP) ===== */
+/* ===== RX BACKPRESSURE ("страховка": CAN не успевает -- тормозим TCP) =====
+ *
+ * ВАЖНО (правка после разбора стопора на burst >= ~320 кадров):
+ * раньше здесь была БИНАРНАЯ заслонка -- "есть место под ВСЮ входящую
+ * пачку целиком -- проходит вся, нет -- не проходит ничего". Это не
+ * настоящий flow control, а полный стоп: как только свободного места
+ * чуть меньше порога, tcp_recved() перестаёт вызываться вообще, окно
+ * приёма TCP схлопывается в ноль, и клиент не может отправить ни байта,
+ * пока мы не откроем окно заново целиком.
+ *
+ * Правильный TCP flow control -- это ЧИСЛО (сколько места реально
+ * есть), а не флаг "да/нет": окно должно сужаться ПРОПОРЦИОНАЛЬНО
+ * занятости буфера, а не падать с "всё" на "ничего". Поэтому очередной
+ * входящий pbuf теперь принимается ЧАСТЯМИ -- забираем столько байт,
+ * сколько реально сейчас влезает в rx_cmd_ring клиента (client_handler.c),
+ * а остаток откладываем в rx_pending и подтверждаем (tcp_recved) только
+ * тот кусок, который действительно приняли. Так клиент продолжает
+ * слать (просто медленнее, по мере освобождения места), а не
+ * останавливается совсем. */
 
 /* Порог свободных слотов в core_to_can_queue канала, ниже которого
- * считаем канал перегруженным и перестаём подтверждать новые данные
- * клиентам этого канала. core_to_can_queues сейчас по 256 слотов
+ * считаем канал перегруженным. core_to_can_queues сейчас по 256 слотов
  * (CORE_TO_CAN_QUEUE_LEN в eth_app.c) -- 32 это ~12% запаса, подбирать
- * опытным путём под реальную нагрузку. */
+ * опытным путём под реальную нагрузку. Это очередь СЛОТОВ (не байтов),
+ * дробить её смысла нет -- она вычитывается независимой задачей (CanTask)
+ * и сама восстановится, отпустив отложенный хвост через
+ * RawTcpServer_NotifyChannelDrained -- поэтому для неё страховка
+ * остаётся бинарной, как и была. */
 #define CAN_QUEUE_BACKPRESSURE_LOW_WATER   32U
 
 /* То же самое, но для eth_to_core_queue -- ОДНОЙ общей очереди на все
@@ -213,25 +236,24 @@ static void RawTcp_ScheduleFlush(uint8_t id)
  * Обнаружили на практике: именно эта очередь, а не core_to_can_queue,
  * оказалась реальным узким местом при burst-нагрузке -- она меньше и
  * стоит на шаг раньше в конвейере (CoreTask успевает вычитывать её
- * медленнее, чем клиент может туда слать). Старая страховка проверяла
- * только core_to_can_queue и эту перегрузку не видела вообще. Порог
- * побольше (64), потому что очередь общая на всех клиентов сразу. */
+ * медленнее, чем клиент может туда слать). Порог побольше (64), потому
+ * что очередь общая на всех клиентов сразу. Тоже очередь слотов --
+ * остаётся бинарной. */
 #define ETH_TO_CORE_QUEUE_BACKPRESSURE_LOW_WATER   64U
 
-/* И ещё раньше в конвейере -- rx_cmd_ring САМОГО этого клиента (8 КБ,
- * см. client_handler.c, CLIENT_RX_CMD_RING_SIZE). Он наполняется прямо
- * здесь, в tcp_server_recv(), а вычитывается отдельной задачей
- * ClientHandlerTask не чаще раза в ~1мс -- при очень плотном burst'е
- * (данные почти всей пачки приходят от клиента почти одновременно)
- * кольцо может переполниться, даже когда обе очереди ПОСЛЕ него
- * (eth_to_core_queue, core_to_can_queue) совершенно свободны. Порог в
- * байтах, с запасом под одну ещё не до конца принятую TCP-сегмент. */
+/* И ещё раньше в конвейере -- rx_cmd_ring САМОГО этого клиента (см.
+ * client_handler.c, CLIENT_RX_CMD_RING_SIZE). Он наполняется прямо
+ * здесь, в tcp_server_recv(), байт за байтом -- и именно он должен
+ * сужаться ПРОПОРЦИОНАЛЬНО, а не бинарно, потому что это самое первое и
+ * самое "мгновенное" звено конвейера: весь burst может прилететь одним
+ * pbuf'ом почти сразу. Порог -- неприкасаемый запас в байтах (на ещё не
+ * до конца принятую строку и общий буфер), а не стоп-флаг. */
 #define CLIENT_RX_RING_BACKPRESSURE_LOW_WATER_BYTES   2048U
 
 /* Чтобы не заваливать tcpip_callback() повторными запросами, пока
  * предыдущий ещё не отработал -- один общий флаг на все каналы/клиентов
  * (сам колбэк дешёвый: проходит по всем клиентам и для каждого
- * проверяет, не пора ли отпустить). */
+ * проверяет, не пора ли отпустить ещё кусок). */
 static volatile uint8_t g_backpressure_poll_scheduled = 0;
 
 static int RawTcp_ChannelHasRoom(uint8_t channel_id)
@@ -250,31 +272,68 @@ static int RawTcp_ChannelHasRoom(uint8_t channel_id)
     return (osMessageQueueGetSpace(core_to_can_queues[channel_id]) >= CAN_QUEUE_BACKPRESSURE_LOW_WATER) ? 1 : 0;
 }
 
-/* Полная проверка для конкретного КЛИЕНТА (не только канала): включает
- * обе очереди конвейера (через RawTcp_ChannelHasRoom) И собственное
- * rx_cmd_ring этого клиента в client_handler.c -- самое первое звено,
- * куда попадают байты сразу из tcp_server_recv(), раньше любой из
- * очередей. */
-static int RawTcp_ClientHasRoom(uint8_t id)
+/* Сколько байт из входящей пачки длиной total_len можно реально принять
+ * ПРЯМО СЕЙЧАС -- не "всё или ничего".
+ *
+ * Очереди конвейера ПОСЛЕ этого клиента (eth_to_core_queue,
+ * core_to_can_queue) -- слоты, не байты, их дробить нет смысла: если там
+ * тесно, останавливаемся целиком, как и раньше (они сами восстановятся
+ * и разблокируют через NotifyChannelDrained).
+ *
+ * А вот место в rx_cmd_ring САМОГО клиента делим пропорционально: сколько
+ * свободных байт есть сверх неприкасаемого запаса -- столько и забираем,
+ * даже если это меньше, чем целиком вся пачка. */
+static uint32_t RawTcp_ClientAcceptableBytes(uint8_t id, uint32_t total_len)
 {
-    if (id >= MAX_CLIENTS) { return 1; }
+    uint32_t ring_free;
+    uint32_t usable;
 
-    if (ClientHandler_RxRingFreeBytes(id) < CLIENT_RX_RING_BACKPRESSURE_LOW_WATER_BYTES)
-    {
-        return 0;
-    }
+    if (!RawTcp_ChannelHasRoom(g_clients[id].channel_id)) { return 0U; }
 
-    return RawTcp_ChannelHasRoom(g_clients[id].channel_id);
+    ring_free = ClientHandler_RxRingFreeBytes(id);
+    if (ring_free <= CLIENT_RX_RING_BACKPRESSURE_LOW_WATER_BYTES) { return 0U; }
+
+    usable = ring_free - CLIENT_RX_RING_BACKPRESSURE_LOW_WATER_BYTES;
+    return (usable < total_len) ? usable : total_len;
 }
 
-/* Дообрабатывает отложенный pbuf клиента id: если место в очереди его
- * канала снова есть -- подтверждает pbuf клиенту (tcp_recved) и
- * передаёт байты в ClientHandler, как в обычном recv. Иначе ничего не
- * делает -- попробуем ещё раз при следующем уведомлении. */
+/* Отдаёт в ClientHandler ровно accept_len байт из НАЧАЛА цепочки
+ * пбуфов p (accept_len гарантированно <= p->tot_len вызывающим кодом) и
+ * возвращает указатель на остаток цепочки -- владение им переходит к
+ * вызывающему (ровно как после pbuf_free_header, на котором эта функция
+ * и построена). Сначала читаем байты (payload сегментов, которые будут
+ * освобождены, ещё цел), потом обрезаем цепочку -- порядок важен. */
+static struct pbuf *RawTcp_ConsumeFrontBytes(uint8_t id, struct pbuf *p, uint32_t accept_len)
+{
+    uint32_t remaining = accept_len;
+    struct pbuf *q = p;
+
+    while ((q != NULL) && (remaining > 0U))
+    {
+        uint32_t take = (remaining < q->len) ? remaining : q->len;
+        if (take > 0U)
+        {
+            ClientHandler_InputBytes(id, (const uint8_t *)q->payload, take);
+        }
+        remaining -= take;
+        if (take < q->len) { break; }   /* этот сегмент принят не целиком -- дальше не идём */
+        q = q->next;
+    }
+
+    return pbuf_free_header(p, (u16_t)accept_len);
+}
+
+/* Дообрабатывает отложенный остаток клиента id: забирает из rx_pending
+ * столько, сколько сейчас реально влезает (RawTcp_ClientAcceptableBytes),
+ * подтверждает клиенту (tcp_recved) ровно этот кусок, а то, что не
+ * влезло -- оставляет в rx_pending на следующий раз. Если места нет
+ * совсем -- ничего не делает, попробуем ещё раз при следующем
+ * уведомлении. */
 static void RawTcp_FlushPendingRx(uint8_t id)
 {
     tcp_client_t *c = &g_clients[id];
     struct pbuf *p;
+    uint32_t accept_len;
 
     if (c->rx_pending == NULL) { return; }
 
@@ -286,17 +345,26 @@ static void RawTcp_FlushPendingRx(uint8_t id)
         return;
     }
 
-    if (!RawTcp_ClientHasRoom(id)) { return; }
+    accept_len = RawTcp_ClientAcceptableBytes(id, c->rx_pending->tot_len);
+    if (accept_len == 0U) { return; }
 
     p = c->rx_pending;
-    c->rx_pending = NULL;
 
-    tcp_recved(c->pcb, p->tot_len);
-    for (struct pbuf *q = p; q != NULL; q = q->next)
+    tcp_recved(c->pcb, (u16_t)accept_len);
+
+    if (accept_len >= p->tot_len)
     {
-        ClientHandler_InputBytes(id, (const uint8_t *)q->payload, q->len);
+        c->rx_pending = NULL;
+        for (struct pbuf *q = p; q != NULL; q = q->next)
+        {
+            ClientHandler_InputBytes(id, (const uint8_t *)q->payload, q->len);
+        }
+        pbuf_free(p);
     }
-    pbuf_free(p);
+    else
+    {
+        c->rx_pending = RawTcp_ConsumeFrontBytes(id, p, accept_len);
+    }
 }
 
 static void raw_tcp_backpressure_poll_cb(void *arg)
@@ -383,6 +451,7 @@ static void tcp_server_error(void *arg, err_t err)
 static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
     uint8_t id = (uint8_t)(uintptr_t)arg;
+    uint32_t accept_len;
 
     if (id >= MAX_CLIENTS)
     {
@@ -419,37 +488,46 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
 
     /* Если уже есть отложенный "хвост" (RX backpressure) -- обязаны
      * сохранить порядок байт, поэтому новый pbuf просто доклеиваем к
-     * нему, а НЕ обрабатываем отдельно прямо сейчас. Иначе данные
-     * дошли бы до ClientHandler не в том порядке, в котором их
-     * отправил клиент. tcp_recved() для этого куска тоже не зовём --
-     * тот же эффект "придержанного ACK" продолжает действовать. */
+     * нему, а НЕ обрабатываем отдельно прямо сейчас. tcp_recved() для
+     * этого куска тоже пока не зовём -- он дождётся своей очереди вместе
+     * со старым хвостом в RawTcp_FlushPendingRx (который теперь тоже
+     * забирает частями, а не всё сразу). */
     if (g_clients[id].rx_pending != NULL)
     {
         pbuf_cat(g_clients[id].rx_pending, p);
         return ERR_OK;
     }
 
-    /* Страховка: core_to_can_queue канала этого клиента почти
-     * заполнена -- CAN физически не успевает забирать кадры быстрее,
-     * чем клиент их шлёт. НЕ подтверждаем (tcp_recved) этот pbuf
-     * прямо сейчас -- откладываем целиком. TCP receive window для
-     * этого соединения перестаёт расти, клиентский TCP-стек сам
-     * снижает скорость отправки -- это и есть "искусственная
-     * задержка ACK", но через штатный механизм TCP, а не руками. */
-    if (!RawTcp_ClientHasRoom(id))
+    /* Страховка: смотрим, сколько из этой пачки реально можно принять
+     * ПРЯМО СЕЙЧАС -- не "всё или ничего". Если влезает не всё, остаток
+     * откладываем, а tcp_recved() зовём только на тот кусок, который
+     * действительно приняли -- окно приёма клиента сужается ровно
+     * настолько, насколько у нас реально кончилось место, а не падает в
+     * ноль. Это и есть "искусственная задержка ACK, пропорциональная
+     * occupancy", через штатный механизм TCP, а не руками. */
+    accept_len = RawTcp_ClientAcceptableBytes(id, p->tot_len);
+
+    if (accept_len == 0U)
     {
         g_clients[id].rx_pending = p;
         return ERR_OK;
     }
 
-    tcp_recved(tpcb, p->tot_len);
+    tcp_recved(tpcb, (u16_t)accept_len);
 
-    for (struct pbuf *q = p; q != NULL; q = q->next)
+    if (accept_len >= p->tot_len)
     {
-        ClientHandler_InputBytes(id, (const uint8_t *)q->payload, q->len);
+        for (struct pbuf *q = p; q != NULL; q = q->next)
+        {
+            ClientHandler_InputBytes(id, (const uint8_t *)q->payload, q->len);
+        }
+        pbuf_free(p);
+    }
+    else
+    {
+        g_clients[id].rx_pending = RawTcp_ConsumeFrontBytes(id, p, accept_len);
     }
 
-    pbuf_free(p);
     return ERR_OK;
 }
 

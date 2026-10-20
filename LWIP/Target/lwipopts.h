@@ -157,7 +157,7 @@ extern "C" {
 #define TCP_SND_BUF                       (8 * TCP_MSS)
 #define TCP_WND                           (12 * TCP_MSS)
 #define PBUF_POOL_SIZE                    24
-#define MEM_SIZE                          (8 * 1024)
+#define MEM_SIZE                          (16 * 1024)
 
 /* ===== ARP ===== */
 #define ARP_TABLE_SIZE                    10

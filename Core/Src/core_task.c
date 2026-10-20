@@ -80,7 +80,7 @@ static void CoreTask_SendResponse(const eth_resp_msg_t *resp)
     {
         static uint32_t core_to_eth_full_count = 0;
         core_to_eth_full_count++;
-        if ((core_to_eth_full_count % 200U) == 0U)
+        if ((core_to_eth_full_count == 1U) || ((core_to_eth_full_count % 200U) == 0U))
         {
             DebugUART_Print("[CORE] ERROR: core_to_eth_queue full (count=%lu)\r\n",
                             (unsigned long)core_to_eth_full_count);
@@ -325,7 +325,7 @@ static void CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
                         static uint32_t core_to_can_full_count = 0;
                         snprintf(resp.data, sizeof(resp.data), "\a");
                         core_to_can_full_count++;
-                        if ((core_to_can_full_count % 200U) == 0U)
+                        if ((core_to_can_full_count == 1U) || ((core_to_can_full_count % 200U) == 0U))
                         {
                             DebugUART_Print("[CORE] ch%u ERROR: core_to_can_queue full (count=%lu)\r\n",
                                             (unsigned)cs->channel_id,

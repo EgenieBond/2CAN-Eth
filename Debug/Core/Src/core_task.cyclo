@@ -1,9 +1,9 @@
 ../Core/Src/core_task.c:65:13:CoreTask_PrintBitrate	2
-../Core/Src/core_task.c:77:13:CoreTask_SendResponse	3
+../Core/Src/core_task.c:77:13:CoreTask_SendResponse	4
 ../Core/Src/core_task.c:91:13:CoreTask_SetFrameAck	2
 ../Core/Src/core_task.c:108:12:CoreTask_TryOpenChannel	6
 ../Core/Src/core_task.c:174:13:CoreTask_CloseChannel	5
-../Core/Src/core_task.c:215:13:CoreTask_HandleEthCommand	18
+../Core/Src/core_task.c:215:13:CoreTask_HandleEthCommand	19
 ../Core/Src/core_task.c:359:13:CoreTask_HandleCanRx	6
 ../Core/Src/core_task.c:398:6:CoreTask_ClientConnected	3
 ../Core/Src/core_task.c:415:6:CoreTask_NotifyClientGone	2
