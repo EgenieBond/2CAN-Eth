@@ -11,6 +11,17 @@
  * TCP-соединения -- к порту 2001 и к порту 2002 -- и работать с обеими
  * шинами одновременно и независимо; для платы это просто два разных
  * слота в общем пуле, каждый со своим channel_id.
+ *
+ * Обновлено (непрерывный поток):
+ *  - страховка от потерянного пробуждения RX back-pressure
+ *    (RawTcpServer_KickPendingRx), приём отложенных байтов считается
+ *    активностью для idle timeout;
+ *  - страховка от потерянного пробуждения TX: если TX-кольцо клиента
+ *    полно, RawTcpServer_SendAsync всё равно планирует flush (раньше после
+ *    ERR_MEM в tcp_write кольцо могло остаться полным навсегда);
+ *  - диагностика: сколько pbuf'ов максимум удерживалось в rx_pending;
+ *  - idle timeout больше не вызывает HandleClientGone дважды;
+ *  - счётчики TX сбрасываются при новом подключении.
  */
 
 #include "raw_tcp_server.h"
@@ -49,23 +60,48 @@ typedef struct
     uint32_t tx_drop_count;
     uint32_t tcp_err_mem_count;
 
-    /* RX backpressure ("страховка"): если буферы конвейера этого
-     * клиента/канала подходят к концу -- принимаем из входящего pbuf'а
-     * ТОЛЬКО СТОЛЬКО, сколько реально есть места ПРЯМО СЕЙЧАС (см.
-     * RawTcp_ClientAcceptableBytes), а остаток откладываем сюда и НЕ
-     * подтверждаем клиенту (tcp_recved() для него не зовём) -- поэтому
-     * TCP receive window для этого соединения сужается РОВНО настолько,
-     * насколько у нас реально кончилось место, а не падает в ноль при
-     * первом же признаке тесноты. Клиентский TCP-стек видит суженное
-     * окно и сам снижает скорость отправки, но не останавливается
-     * совсем, пока окно не схлопнулось полностью. Как только в буферах
-     * снова появляется место (см. RawTcpServer_NotifyChannelDrained),
-     * отложенный остаток дообрабатывается -- тоже, возможно, частями. */
+    /* RX backpressure: остаток входящих данных, которые пока некуда
+     * положить. tcp_recved() для них не зовём -- TCP-окно клиента сужается
+     * ровно на этот объём. Дообрабатывается в RawTcp_FlushPendingRx. */
     struct pbuf *rx_pending;
+
+    /* Диагностика: максимум удерживаемых в rx_pending pbuf'ов и байт.
+     * Если max_clen подходит к числу RX-буферов Ethernet-драйвера --
+     * удержание pbuf'ов душит приём всего Ethernet (не только этого
+     * клиента). */
+    uint16_t rx_pending_max_clen;
+    uint32_t rx_pending_max_bytes;
 } tcp_client_t;
 
 static struct tcp_pcb *g_server_pcb[NUM_CHANNELS] = { NULL };
 static tcp_client_t g_clients[MAX_CLIENTS];
+
+/* ===== Диагностика ===== */
+
+static void RawTcp_TrackPending(uint8_t id)
+{
+    tcp_client_t *c = &g_clients[id];
+    u16_t clen;
+
+    if (c->rx_pending == NULL) { return; }
+
+    clen = pbuf_clen(c->rx_pending);
+    if (clen > c->rx_pending_max_clen)                  { c->rx_pending_max_clen  = clen; }
+    if (c->rx_pending->tot_len > c->rx_pending_max_bytes) { c->rx_pending_max_bytes = c->rx_pending->tot_len; }
+}
+
+static void RawTcp_PrintClientStats(uint8_t id)
+{
+    tcp_client_t *c = &g_clients[id];
+
+    DebugUART_Print("[TCP] id=%u TX drop count=%lu ERR_MEM count=%lu "
+                    "rx_pending max: pbufs=%u bytes=%lu\r\n",
+                    (unsigned)id,
+                    (unsigned long)c->tx_drop_count,
+                    (unsigned long)c->tcp_err_mem_count,
+                    (unsigned)c->rx_pending_max_clen,
+                    (unsigned long)c->rx_pending_max_bytes);
+}
 
 /* ===== TX-кольцо конкретного клиента ===== */
 
@@ -101,9 +137,11 @@ static int RawTcp_TxPush(uint8_t id, const uint8_t *data, size_t len)
     {
         osKernelUnlock();
         c->tx_drop_count++;
-        if ((c->tx_drop_count == 1U) || ((c->tx_drop_count % 100U) == 0U))
+        /* Это не потеря данных: батч остаётся у ClientHandler и будет
+         * предложен снова. Печатаем редко, чтобы не душить систему UART'ом. */
+        if ((c->tx_drop_count == 1U) || ((c->tx_drop_count % 1000U) == 0U))
         {
-            DebugUART_Print("[TCP] id=%u TX ring drops=%lu\r\n",
+            DebugUART_Print("[TCP] id=%u TX ring full (push refused) count=%lu\r\n",
                             (unsigned)id, (unsigned long)c->tx_drop_count);
         }
         return -2;
@@ -156,6 +194,10 @@ static void RawTcp_TryFlush(uint8_t id)
 
         if (wr == ERR_MEM)
         {
+            /* Нехватка памяти lwIP. Повтор произойдёт либо из sent-колбэка
+             * (если есть неподтверждённые данные), либо из следующего
+             * RawTcpServer_SendAsync -- он теперь планирует flush даже при
+             * полном кольце, см. ниже. */
             c->tcp_err_mem_count++;
             break;
         }
@@ -203,64 +245,29 @@ static void RawTcp_ScheduleFlush(uint8_t id)
 
 /* ===== RX BACKPRESSURE ("страховка": CAN не успевает -- тормозим TCP) =====
  *
- * ВАЖНО (правка после разбора стопора на burst >= ~320 кадров):
- * раньше здесь была БИНАРНАЯ заслонка -- "есть место под ВСЮ входящую
- * пачку целиком -- проходит вся, нет -- не проходит ничего". Это не
- * настоящий flow control, а полный стоп: как только свободного места
- * чуть меньше порога, tcp_recved() перестаёт вызываться вообще, окно
- * приёма TCP схлопывается в ноль, и клиент не может отправить ни байта,
- * пока мы не откроем окно заново целиком.
- *
- * Правильный TCP flow control -- это ЧИСЛО (сколько места реально
- * есть), а не флаг "да/нет": окно должно сужаться ПРОПОРЦИОНАЛЬНО
- * занятости буфера, а не падать с "всё" на "ничего". Поэтому очередной
- * входящий pbuf теперь принимается ЧАСТЯМИ -- забираем столько байт,
+ * Очередной входящий pbuf принимается ЧАСТЯМИ: забираем столько байт,
  * сколько реально сейчас влезает в rx_cmd_ring клиента (client_handler.c),
  * а остаток откладываем в rx_pending и подтверждаем (tcp_recved) только
- * тот кусок, который действительно приняли. Так клиент продолжает
- * слать (просто медленнее, по мере освобождения места), а не
- * останавливается совсем. */
+ * тот кусок, который действительно приняли. Так TCP-окно клиента
+ * сужается пропорционально занятости буферов, а не падает в ноль. */
 
 /* Порог свободных слотов в core_to_can_queue канала, ниже которого
- * считаем канал перегруженным. core_to_can_queues сейчас по 256 слотов
- * (CORE_TO_CAN_QUEUE_LEN в eth_app.c) -- 32 это ~12% запаса, подбирать
- * опытным путём под реальную нагрузку. Это очередь СЛОТОВ (не байтов),
- * дробить её смысла нет -- она вычитывается независимой задачей (CanTask)
- * и сама восстановится, отпустив отложенный хвост через
- * RawTcpServer_NotifyChannelDrained -- поэтому для неё страховка
- * остаётся бинарной, как и была. */
+ * считаем канал перегруженным (очередь слотов -- страховка бинарная). */
 #define CAN_QUEUE_BACKPRESSURE_LOW_WATER   32U
 
-/* То же самое, но для eth_to_core_queue -- ОДНОЙ общей очереди на все
- * каналы/клиентов (ETH_TO_CORE_QUEUE_LEN в eth_app.c, сейчас 512).
- * Обнаружили на практике: именно эта очередь, а не core_to_can_queue,
- * оказалась реальным узким местом при burst-нагрузке -- она меньше и
- * стоит на шаг раньше в конвейере (CoreTask успевает вычитывать её
- * медленнее, чем клиент может туда слать). Порог побольше (64), потому
- * что очередь общая на всех клиентов сразу. Тоже очередь слотов --
- * остаётся бинарной. */
+/* То же для eth_to_core_queue -- ОДНОЙ общей очереди на все каналы. */
 #define ETH_TO_CORE_QUEUE_BACKPRESSURE_LOW_WATER   64U
 
-/* И ещё раньше в конвейере -- rx_cmd_ring САМОГО этого клиента (см.
- * client_handler.c, CLIENT_RX_CMD_RING_SIZE). Он наполняется прямо
- * здесь, в tcp_server_recv(), байт за байтом -- и именно он должен
- * сужаться ПРОПОРЦИОНАЛЬНО, а не бинарно, потому что это самое первое и
- * самое "мгновенное" звено конвейера: весь burst может прилететь одним
- * pbuf'ом почти сразу. Порог -- неприкасаемый запас в байтах (на ещё не
- * до конца принятую строку и общий буфер), а не стоп-флаг. */
+/* Неприкасаемый запас в rx_cmd_ring клиента (байт). */
 #define CLIENT_RX_RING_BACKPRESSURE_LOW_WATER_BYTES   2048U
 
-/* Чтобы не заваливать tcpip_callback() повторными запросами, пока
- * предыдущий ещё не отработал -- один общий флаг на все каналы/клиентов
- * (сам колбэк дешёвый: проходит по всем клиентам и для каждого
- * проверяет, не пора ли отпустить ещё кусок). */
+/* Один общий флаг на все каналы/клиентов, чтобы не заваливать
+ * tcpip_callback() повторными запросами, пока предыдущий не отработал. */
 static volatile uint8_t g_backpressure_poll_scheduled = 0;
+static uint32_t g_backpressure_poll_cb_fail = 0;
 
 static int RawTcp_ChannelHasRoom(uint8_t channel_id)
 {
-    /* Сначала -- общая eth_to_core_queue (одна на все каналы и клиентов).
-     * Это самый первый шаг конвейера после разбора команды, и на
-     * практике он переполняется раньше, чем core_to_can_queue. */
     if ((eth_to_core_queue != NULL) &&
         (osMessageQueueGetSpace(eth_to_core_queue) < ETH_TO_CORE_QUEUE_BACKPRESSURE_LOW_WATER))
     {
@@ -273,16 +280,7 @@ static int RawTcp_ChannelHasRoom(uint8_t channel_id)
 }
 
 /* Сколько байт из входящей пачки длиной total_len можно реально принять
- * ПРЯМО СЕЙЧАС -- не "всё или ничего".
- *
- * Очереди конвейера ПОСЛЕ этого клиента (eth_to_core_queue,
- * core_to_can_queue) -- слоты, не байты, их дробить нет смысла: если там
- * тесно, останавливаемся целиком, как и раньше (они сами восстановятся
- * и разблокируют через NotifyChannelDrained).
- *
- * А вот место в rx_cmd_ring САМОГО клиента делим пропорционально: сколько
- * свободных байт есть сверх неприкасаемого запаса -- столько и забираем,
- * даже если это меньше, чем целиком вся пачка. */
+ * ПРЯМО СЕЙЧАС -- не "всё или ничего". */
 static uint32_t RawTcp_ClientAcceptableBytes(uint8_t id, uint32_t total_len)
 {
     uint32_t ring_free;
@@ -298,11 +296,8 @@ static uint32_t RawTcp_ClientAcceptableBytes(uint8_t id, uint32_t total_len)
 }
 
 /* Отдаёт в ClientHandler ровно accept_len байт из НАЧАЛА цепочки
- * пбуфов p (accept_len гарантированно <= p->tot_len вызывающим кодом) и
- * возвращает указатель на остаток цепочки -- владение им переходит к
- * вызывающему (ровно как после pbuf_free_header, на котором эта функция
- * и построена). Сначала читаем байты (payload сегментов, которые будут
- * освобождены, ещё цел), потом обрезаем цепочку -- порядок важен. */
+ * пбуфов p и возвращает указатель на остаток цепочки. Сначала читаем
+ * байты, потом обрезаем цепочку -- порядок важен. */
 static struct pbuf *RawTcp_ConsumeFrontBytes(uint8_t id, struct pbuf *p, uint32_t accept_len)
 {
     uint32_t remaining = accept_len;
@@ -324,11 +319,8 @@ static struct pbuf *RawTcp_ConsumeFrontBytes(uint8_t id, struct pbuf *p, uint32_
 }
 
 /* Дообрабатывает отложенный остаток клиента id: забирает из rx_pending
- * столько, сколько сейчас реально влезает (RawTcp_ClientAcceptableBytes),
- * подтверждает клиенту (tcp_recved) ровно этот кусок, а то, что не
- * влезло -- оставляет в rx_pending на следующий раз. Если места нет
- * совсем -- ничего не делает, попробуем ещё раз при следующем
- * уведомлении. */
+ * столько, сколько сейчас реально влезает, подтверждает клиенту
+ * (tcp_recved) ровно этот кусок, остальное оставляет на следующий раз. */
 static void RawTcp_FlushPendingRx(uint8_t id)
 {
     tcp_client_t *c = &g_clients[id];
@@ -347,6 +339,11 @@ static void RawTcp_FlushPendingRx(uint8_t id)
 
     accept_len = RawTcp_ClientAcceptableBytes(id, c->rx_pending->tot_len);
     if (accept_len == 0U) { return; }
+
+    /* Приём отложенных данных -- это реальная активность клиента: он шлёт,
+     * мы принимаем, просто медленнее (back-pressure). Без этого при долгом
+     * штатном торможении соединение убивалось бы по idle timeout. */
+    c->last_activity_tick = osKernelGetTickCount();
 
     p = c->rx_pending;
 
@@ -380,10 +377,12 @@ static void raw_tcp_backpressure_poll_cb(void *arg)
 
 /*
  * Вызывается из CanTask каждый раз, когда из core_to_can_queue канала
- * channel_id реально забрали кадр -- то есть там могло освободиться
- * место. CanTask работает не в tcpip-потоке, поэтому саму проверку и
- * tcp_recved() откладываем через tcpip_callback() -- трогать структуры
- * lwIP напрямую из чужого потока нельзя.
+ * channel_id реально забрали кадр. CanTask работает не в tcpip-потоке,
+ * поэтому проверку и tcp_recved() откладываем через tcpip_callback().
+ *
+ * tcpip_callback() может не пройти (mailbox tcpip-потока полон под
+ * нагрузкой) -- тогда уведомление теряется; от "последнего потерянного
+ * пробуждения" страхует RawTcpServer_KickPendingRx().
  */
 void RawTcpServer_NotifyChannelDrained(uint8_t channel_id)
 {
@@ -395,6 +394,31 @@ void RawTcpServer_NotifyChannelDrained(uint8_t channel_id)
     if (tcpip_callback(raw_tcp_backpressure_poll_cb, NULL) != ERR_OK)
     {
         g_backpressure_poll_scheduled = 0;
+        g_backpressure_poll_cb_fail++;
+        if ((g_backpressure_poll_cb_fail == 1U) || ((g_backpressure_poll_cb_fail % 1000U) == 0U))
+        {
+            DebugUART_Print("[TCP] WARNING: tcpip_callback(backpressure poll) failed, count=%lu\r\n",
+                            (unsigned long)g_backpressure_poll_cb_fail);
+        }
+    }
+}
+
+/*
+ * Страховка от потерянного пробуждения: вызывается из ClientHandlerTask
+ * каждую 1 мс. Если у какого-то клиента висит rx_pending -- запрашиваем
+ * проверку, не дожидаясь CanTask. rx_pending читается здесь из чужого
+ * потока без блокировки -- нужен только признак "не NULL", в худшем
+ * случае будет один лишний или пропущенный пинок.
+ */
+void RawTcpServer_KickPendingRx(void)
+{
+    for (uint8_t id = 0; id < MAX_CLIENTS; id++)
+    {
+        if (g_clients[id].rx_pending != NULL)
+        {
+            RawTcpServer_NotifyChannelDrained(g_clients[id].channel_id);
+            return;   /* колбэк обходит всех клиентов сам */
+        }
     }
 }
 
@@ -439,10 +463,7 @@ static void tcp_server_error(void *arg, err_t err)
 
     DebugUART_Print("[TCP] id=%u ch%u ERROR cb err=%d\r\n",
                     (unsigned)id, (unsigned)g_clients[id].channel_id, (int)err);
-    DebugUART_Print("[TCP] id=%u TX drop count=%lu ERR_MEM count=%lu\r\n",
-                    (unsigned)id,
-                    (unsigned long)g_clients[id].tx_drop_count,
-                    (unsigned long)g_clients[id].tcp_err_mem_count);
+    RawTcp_PrintClientStats(id);
     DebugUART_Print("==================== CONNECTION CLOSED (error) ====================\r\n\r\n");
 
     RawTcp_HandleClientGone(id);
@@ -465,6 +486,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
     {
         DebugUART_Print("[TCP] id=%u ch%u Client disconnected\r\n",
                         (unsigned)id, (unsigned)g_clients[id].channel_id);
+        RawTcp_PrintClientStats(id);
         DebugUART_Print("==================== CONNECTION CLOSED ====================\r\n\r\n");
 
         tcp_arg(tpcb, NULL);
@@ -486,30 +508,22 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
         return err;
     }
 
-    /* Если уже есть отложенный "хвост" (RX backpressure) -- обязаны
-     * сохранить порядок байт, поэтому новый pbuf просто доклеиваем к
-     * нему, а НЕ обрабатываем отдельно прямо сейчас. tcp_recved() для
-     * этого куска тоже пока не зовём -- он дождётся своей очереди вместе
-     * со старым хвостом в RawTcp_FlushPendingRx (который теперь тоже
-     * забирает частями, а не всё сразу). */
+    /* Если уже есть отложенный "хвост" -- обязаны сохранить порядок байт,
+     * поэтому новый pbuf доклеиваем к нему; tcp_recved() для него тоже
+     * пока не зовём. */
     if (g_clients[id].rx_pending != NULL)
     {
         pbuf_cat(g_clients[id].rx_pending, p);
+        RawTcp_TrackPending(id);
         return ERR_OK;
     }
 
-    /* Страховка: смотрим, сколько из этой пачки реально можно принять
-     * ПРЯМО СЕЙЧАС -- не "всё или ничего". Если влезает не всё, остаток
-     * откладываем, а tcp_recved() зовём только на тот кусок, который
-     * действительно приняли -- окно приёма клиента сужается ровно
-     * настолько, насколько у нас реально кончилось место, а не падает в
-     * ноль. Это и есть "искусственная задержка ACK, пропорциональная
-     * occupancy", через штатный механизм TCP, а не руками. */
     accept_len = RawTcp_ClientAcceptableBytes(id, p->tot_len);
 
     if (accept_len == 0U)
     {
         g_clients[id].rx_pending = p;
+        RawTcp_TrackPending(id);
         return ERR_OK;
     }
 
@@ -526,6 +540,7 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
     else
     {
         g_clients[id].rx_pending = RawTcp_ConsumeFrontBytes(id, p, accept_len);
+        RawTcp_TrackPending(id);
     }
 
     return ERR_OK;
@@ -533,10 +548,8 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
 
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
-    /* arg здесь -- channel_id этого СЕРВЕРНОГО pcb, установлен заранее
-     * в RawTcpServer_Init() через tcp_arg(server_pcb[ch], ...). Это
-     * НЕ то же самое, что client_id -- ниже мы найдём свободный слот
-     * в общем пуле и назначим client_id отдельно. */
+    /* arg здесь -- channel_id этого СЕРВЕРНОГО pcb (см. RawTcpServer_Init).
+     * client_id назначается отдельно -- первый свободный слот в общем пуле. */
     uint8_t channel_id = (uint8_t)(uintptr_t)arg;
     uint8_t free_id = MAX_CLIENTS;
 
@@ -566,6 +579,10 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     g_clients[free_id].pcb = newpcb;
     g_clients[free_id].channel_id = channel_id;
     g_clients[free_id].last_activity_tick = osKernelGetTickCount();
+    g_clients[free_id].tx_drop_count = 0;
+    g_clients[free_id].tcp_err_mem_count = 0;
+    g_clients[free_id].rx_pending_max_clen = 0;
+    g_clients[free_id].rx_pending_max_bytes = 0;
     RawTcp_TxReset(free_id);
 
     ClientHandler_ClientConnected(free_id, channel_id);
@@ -613,7 +630,19 @@ int RawTcpServer_SendAsync(uint8_t client_id, const uint8_t *data, size_t len)
     if ((data == NULL) || (len == 0U))            { return -1; }
     if (client_id >= MAX_CLIENTS)                  { return -2; }
     if (g_clients[client_id].pcb == NULL)          { return -2; }
-    if (RawTcp_TxPush(client_id, data, len) != 0)  { return -3; }
+
+    if (RawTcp_TxPush(client_id, data, len) != 0)
+    {
+        /* Кольцо полно. Всё равно просим tcpip-поток попробовать его
+         * протолкнуть: если прошлый tcp_write упал с ERR_MEM, а
+         * неподтверждённых данных в полёте нет, sent-колбэк не придёт
+         * никогда -- и без этого пинка кольцо осталось бы полным навсегда
+         * (потерянное пробуждение на TX-стороне). ClientHandler повторяет
+         * SendAsync каждую 1 мс, так что попытки идут регулярно. */
+        RawTcp_ScheduleFlush(client_id);
+        return -3;
+    }
+
     RawTcp_ScheduleFlush(client_id);
     return 0;
 }
@@ -624,14 +653,26 @@ void RawTcpServer_CheckIdleTimeout(void)
 
     for (uint8_t id = 0; id < MAX_CLIENTS; id++)
     {
-        if (g_clients[id].pcb == NULL) { continue; }
+        struct tcp_pcb *pcb = g_clients[id].pcb;
+
+        if (pcb == NULL) { continue; }
 
         if ((now - g_clients[id].last_activity_tick) > CLIENT_IDLE_TIMEOUT_MS)
         {
             DebugUART_Print("[TCP] id=%u ch%u idle timeout -- forcing abort\r\n",
                             (unsigned)id, (unsigned)g_clients[id].channel_id);
+            RawTcp_PrintClientStats(id);
             DebugUART_Print("==================== CONNECTION CLOSED (idle timeout) ====================\r\n\r\n");
-            tcp_abort(g_clients[id].pcb);
+
+            /* Отцепляем колбэки ДО tcp_abort: иначе tcp_abort вызовет
+             * tcp_server_error, тот сделает HandleClientGone, и ниже мы
+             * сделали бы его второй раз (двойной "C\r" и двойной лог). */
+            tcp_arg(pcb, NULL);
+            tcp_recv(pcb, NULL);
+            tcp_sent(pcb, NULL);
+            tcp_err(pcb, NULL);
+            tcp_abort(pcb);
+
             RawTcp_HandleClientGone(id);
         }
     }

@@ -25,6 +25,7 @@ extern "C" {
 void RawTcpServer_Init(void);
 void RawTcpServer_CheckIdleTimeout(void);
 void RawTcpServer_NotifyChannelDrained(uint8_t channel_id);
+void RawTcpServer_KickPendingRx(void);
 
 int  RawTcpServer_HasClient(uint8_t client_id);
 

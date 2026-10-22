@@ -153,9 +153,9 @@ extern "C" {
 #define PBUF_POOL_BUFSIZE                 1536
 
 /* основные буферы */
-#define MEMP_NUM_TCP_SEG                  32	/* должно быть >= TCP_SND_QUEUELEN = 4*8 = 32, ставим с запасом */
+#define MEMP_NUM_TCP_SEG                  96	/* было TCP_SND_QUEUELEN = 4*8 = 32 */
 #define TCP_SND_BUF                       (8 * TCP_MSS)
-#define TCP_WND                           (12 * TCP_MSS)
+#define TCP_WND                           (4 * TCP_MSS)   //было 12
 #define PBUF_POOL_SIZE                    24
 #define MEM_SIZE                          (16 * 1024)
 

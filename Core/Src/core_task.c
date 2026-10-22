@@ -23,6 +23,17 @@
  *  (can_to_core_queues[0] и [1]) по очереди, передавая channel_id
  *  в CoreTask_HandleCanRx, чтобы рассылка ответов ушла только тем
  *  клиентам, что привязаны именно к этому каналу.
+ *
+ *  Обновлено (flow control ETH -> CAN):
+ *  - если core_to_can_queue полна, кадр больше НЕ выбрасывается с "\a":
+ *    CoreTask держит команду у себя (pending_cmd) и перестаёт брать новые
+ *    из eth_to_core_queue -- затор доходит до TCP-окна и тормозит ПК;
+ *  - то же самое, если некуда положить ответ "Z\r" (core_to_eth_queue
+ *    полна) -- иначе кадр ушёл бы на шину, а подтверждение потерялось;
+ *  - CAN RX не вычитывается из can_to_core_queues, пока в core_to_eth_queue
+ *    нет места под рассылку -- кадр ждёт в can_to_core_queue, а не
+ *    теряется здесь (CoreTask -- единственный писатель core_to_eth_queue,
+ *    поэтому проверка места заранее надёжна).
  */
 
 #include "core_task.h"
@@ -61,6 +72,21 @@ typedef struct
 } can_bus_state_t;
 
 static can_bus_state_t g_bus[NUM_CHANNELS];
+
+typedef enum
+{
+    CORE_CMD_DONE  = 0,   /* команда обработана, ответ отправлен */
+    CORE_CMD_RETRY = 1    /* некуда положить кадр/ответ -- ничего не сделано, повторить позже */
+} core_cmd_result_t;
+
+/* Сколько максимум держим одну команду в ожидании места.
+ * При нормальной перегрузке слот освобождается каждые ~0.2 мс (1 кадр на 1 Мбит/с),
+ * так что 500 мс -- это уже не back-pressure, а авария шины.
+ * (Предполагается configTICK_RATE_HZ = 1000, т.е. 1 тик = 1 мс.) */
+#define CORE_PENDING_MAX_MS   500U
+
+static uint32_t g_core_to_can_backpressure[NUM_CHANNELS];
+static uint32_t g_core_to_eth_backpressure = 0;
 
 static void CoreTask_PrintBitrate(const char *prefix, uint8_t bitrate_code, uint32_t bitrate_bps)
 {
@@ -212,7 +238,7 @@ static void CoreTask_CloseChannel(uint8_t id, eth_resp_msg_t *resp)
 #endif
 }
 
-static void CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
+static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
 {
     uint8_t id = cmd_msg->client_id;
     slcan_cmd_t parsed;
@@ -225,7 +251,7 @@ static void CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
     if (id >= MAX_CLIENTS)
     {
         DebugUART_Print("[CORE] ERROR: invalid client_id=%u in command\r\n", (unsigned)id);
-        return;
+        return CORE_CMD_DONE;
     }
 
     resp.channel_id = g_client_can[id].channel_id;   /* для справки/диагностики в ответе */
@@ -234,14 +260,14 @@ static void CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
     {
         snprintf(resp.data, sizeof(resp.data), NETCAN_SERIAL_RESPONSE);
         CoreTask_SendResponse(&resp);
-        return;
+        return CORE_CMD_DONE;
     }
 
     if (strcmp(cmd_msg->data, "V\r") == 0)
     {
         snprintf(resp.data, sizeof(resp.data), NETCAN_VERSION_RESPONSE);
         CoreTask_SendResponse(&resp);
-        return;
+        return CORE_CMD_DONE;
     }
 
     if (Slcan_ParseCommand(cmd_msg->data, &parsed) != 0)
@@ -320,22 +346,38 @@ static void CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
 #if CORE_SLCAN_STRESS_TEST_NO_CAN
                     CoreTask_SetFrameAck(&can_msg.frame, &resp);
 #else
+                    /* Подтверждение "Z\r" должно гарантированно влезть в
+                     * core_to_eth_queue: иначе кадр уйдёт на шину, а ПК так и
+                     * не узнает, что он принят. CoreTask -- единственный
+                     * писатель этой очереди, поэтому проверка места заранее
+                     * надёжна. Нет места -- тоже back-pressure, не ошибка. */
+                    if (osMessageQueueGetSpace(core_to_eth_queue) == 0U)
+                    {
+                        g_core_to_eth_backpressure++;
+                        if ((g_core_to_eth_backpressure == 1U) || ((g_core_to_eth_backpressure % 10000U) == 0U))
+                        {
+                            DebugUART_Print("[CORE] back-pressure: core_to_eth_queue full (events=%lu)\r\n",
+                                            (unsigned long)g_core_to_eth_backpressure);
+                        }
+                        return CORE_CMD_RETRY;
+                    }
+
                     if (osMessageQueuePut(core_to_can_queues[cs->channel_id], &can_msg, 0, 0) != osOK)
                     {
-                        static uint32_t core_to_can_full_count = 0;
-                        snprintf(resp.data, sizeof(resp.data), "\a");
-                        core_to_can_full_count++;
-                        if ((core_to_can_full_count == 1U) || ((core_to_can_full_count % 200U) == 0U))
+                        /* Очередь в CAN полна -- это НЕ ошибка, а back-pressure:
+                         * ничего не отвечаем и ничего не выбрасываем, команду
+                         * держит у себя CoreTask и повторит позже. Пока она
+                         * висит, CoreTask не берёт новые из eth_to_core_queue --
+                         * так затор доходит до TCP-окна и тормозит сам ПК. */
+                        uint32_t n = ++g_core_to_can_backpressure[cs->channel_id];
+                        if ((n == 1U) || ((n % 10000U) == 0U))
                         {
-                            DebugUART_Print("[CORE] ch%u ERROR: core_to_can_queue full (count=%lu)\r\n",
-                                            (unsigned)cs->channel_id,
-                                            (unsigned long)core_to_can_full_count);
+                            DebugUART_Print("[CORE] ch%u back-pressure: core_to_can_queue full (events=%lu)\r\n",
+                                            (unsigned)cs->channel_id, (unsigned long)n);
                         }
+                        return CORE_CMD_RETRY;
                     }
-                    else
-                    {
-                        CoreTask_SetFrameAck(&can_msg.frame, &resp);
-                    }
+                    CoreTask_SetFrameAck(&can_msg.frame, &resp);
 #endif
                 }
                 break;
@@ -349,6 +391,7 @@ static void CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
     }
 
     CoreTask_SendResponse(&resp);
+    return CORE_CMD_DONE;
 }
 
 /*
@@ -434,6 +477,15 @@ static void CoreTask(void *argument)
     can_msg_t can_msg;
     static uint32_t heartbeat_processed = 0;
 
+    /* Команда, которую не удалось обработать (нет места в core_to_can_queue
+     * или в core_to_eth_queue). Пока она есть, новые команды из
+     * eth_to_core_queue НЕ берём -- это и создаёт back-pressure вплоть до
+     * TCP-окна. */
+    static eth_cmd_msg_t pending_cmd;
+    static uint8_t       pending_cmd_valid = 0;
+    static uint32_t      pending_since_tick = 0;
+    static uint32_t      pending_timeout_drops = 0;
+
     DebugUART_Print("[CORE] CoreTask started\r\n");
 #if CORE_SLCAN_STRESS_TEST_NO_CAN
     DebugUART_Print("[CORE] MODE: SLCAN STRESS TEST WITHOUT CAN\r\n");
@@ -464,30 +516,84 @@ static void CoreTask(void *argument)
     for (;;)
     {
         uint32_t processed = 0;
+        uint8_t  eth_blocked = 0;
 
-        for (uint32_t i = 0; i < 128; i++)
+        /* 1. Сначала -- отложенная команда (порядок команд не нарушается). */
+        if (pending_cmd_valid)
         {
-            if (osMessageQueueGet(eth_to_core_queue, &cmd_msg, NULL, 0) == osOK)
+            if (CoreTask_HandleEthCommand(&pending_cmd) == CORE_CMD_DONE)
             {
-                CoreTask_HandleEthCommand(&cmd_msg);
+                pending_cmd_valid = 0;
                 processed++;
+                heartbeat_processed++;
+            }
+            else if ((osKernelGetTickCount() - pending_since_tick) > CORE_PENDING_MAX_MS)
+            {
+                /* Места нет слишком долго (шина без ACK, bus-off...) --
+                 * это авария, а не перегрузка. Отбрасываем с BELL, чтобы не
+                 * заблокировать навсегда всех клиентов (включая их "C\r"). */
+                eth_resp_msg_t resp;
+                memset(&resp, 0, sizeof(resp));
+                resp.client_id  = pending_cmd.client_id;
+                resp.channel_id = pending_cmd.channel_id;
+                snprintf(resp.data, sizeof(resp.data), "\a");
+                CoreTask_SendResponse(&resp);
 
+                pending_cmd_valid = 0;
+                pending_timeout_drops++;
+                DebugUART_Print("[CORE] id=%u ch%u ERROR: frame dropped after %u ms waiting for queue space "
+                                "(total timeout drops=%lu)\r\n",
+                                (unsigned)pending_cmd.client_id, (unsigned)pending_cmd.channel_id,
+                                (unsigned)CORE_PENDING_MAX_MS, (unsigned long)pending_timeout_drops);
+                processed++;
+            }
+            else
+            {
+                eth_blocked = 1;
+            }
+        }
+
+        /* 2. Новые команды -- только если ничего не висит. */
+        if (!eth_blocked)
+        {
+            for (uint32_t i = 0; i < 128; i++)
+            {
+                if (osMessageQueueGet(eth_to_core_queue, &cmd_msg, NULL, 0) != osOK)
+                {
+                    break;
+                }
+
+                if (CoreTask_HandleEthCommand(&cmd_msg) == CORE_CMD_RETRY)
+                {
+                    pending_cmd        = cmd_msg;
+                    pending_cmd_valid  = 1;
+                    pending_since_tick = osKernelGetTickCount();
+                    break;
+                }
+
+                processed++;
                 heartbeat_processed++;
                 if ((heartbeat_processed % 5000U) == 0U)
                 {
                     DebugUART_Print("[CORE] heartbeat: processed=%lu\r\n", (unsigned long)heartbeat_processed);
                 }
             }
-            else
-            {
-                break;
-            }
         }
 
+        /* 3. CAN RX обслуживается ВСЕГДА, даже когда ETH-вход заторможен.
+         * Но кадр забираем из can_to_core_queue, только если в
+         * core_to_eth_queue есть место под рассылку всем клиентам канала:
+         * иначе он потерялся бы здесь, а так подождёт в can_to_core_queue
+         * (её переполнение честно видно в счётчике queue_drop у CanTask). */
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++)
         {
             for (uint32_t i = 0; i < 128; i++)
             {
+                if (osMessageQueueGetSpace(core_to_eth_queue) < (uint32_t)MAX_CLIENTS)
+                {
+                    break;
+                }
+
                 if (osMessageQueueGet(can_to_core_queues[ch], &can_msg, NULL, 0) == osOK)
                 {
                     CoreTask_HandleCanRx(ch, &can_msg);

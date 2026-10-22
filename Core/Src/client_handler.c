@@ -13,27 +13,24 @@
  *
  *  core_to_eth_queue остаётся ОБЩЕЙ на всю систему (оба канала) --
  *  ClientHandler_PollTx() разбирает её целиком за один проход и
- *  раскладывает сообщения по персональным TX-буферам клиентов, ровно
- *  как раньше (это не зависит от того, к какому каналу привязан
- *  клиент -- то, что channel_id прописан в ответе, важно только для
- *  диагностики/логов, доставка всё равно идёт по client_id).
+ *  раскладывает сообщения по персональным TX-буферам клиентов (доставка
+ *  идёт по client_id, channel_id в ответе -- только для диагностики).
  *
- *  Обновлено ещё раз (разбор стопора на burst >= ~310-320 кадров):
- *  найден и исправлен баг потери данных в ClientHandler_PollTx() --
- *  см. подробный комментарий над ClientHandler_FlushTxBatch() и в
- *  самой функции. Коротко: при массовом burst'е TX-кольцо клиента в
- *  raw_tcp_server.c (RAW_TCP_TX_RING_SIZE_PER_CLIENT) может на
- *  короткое время переполниться -- RawTcpServer_SendAsync() в этом
- *  случае возвращал ошибку, а ClientHandler_PollTx() эту ошибку
- *  просто считал (tcp_send_fail_count++) и БЕЗУСЛОВНО обнулял
- *  c->tx_len, то есть выбрасывал уже собранный батч ответов НАВСЕГДА.
- *  При этом порог печати в лог (раз в 100) почти никогда не
- *  срабатывал на единичных потерях (7-8 кадров из burst'а в 320) --
- *  поэтому в UART-логе всё выглядело так, будто потерь нигде нет.
- *  Теперь непротолкнутый батч не обнуляется, а остаётся в tx_batch и
- *  повторно пробуется на следующем тике (ClientHandlerTask крутится
- *  каждую 1 мс) -- ровно тот же приём отложенного элемента, что уже
- *  был у pending_cmd/pending_cmd_valid на RX-стороне.
+ *  Обновлено (разбор стопора на burst >= ~310-320 кадров): непротолкнутый
+ *  батч больше не обнуляется, а остаётся в tx_batch и повторно пробуется
+ *  на следующем тике -- см. ClientHandler_FlushTxBatch().
+ *
+ *  Обновлено (непрерывный поток): исправлено НАРУШЕНИЕ ПОРЯДКА кадров в
+ *  ClientHandler_PollTx(). Раньше ответ, отложенный в pending_resp, мог
+ *  быть обогнан более новыми: если внутри того же прохода очередная
+ *  попытка FlushTxBatch() вдруг удавалась (tcpip-поток параллельно
+ *  освободил TX-кольцо), новые ответы дописывались в пустой tx_batch
+ *  РАНЬШЕ отложенного. На ПК это выглядело как "ожидали 720, пришло 561".
+ *  Теперь инвариант: пока у клиента есть pending_resp, ничего новее в его
+ *  tx_batch не попадает -- см. ClientHandler_TryPlacePending().
+ *
+ *  Также добавлена страховка от потерянного пробуждения RX back-pressure
+ *  (RawTcpServer_KickPendingRx() каждый тик).
  */
 
 #include "client_handler.h"
@@ -79,19 +76,19 @@ typedef struct
 
     /* Один отложенный resp -- если TX-кольцо платы (raw_tcp_server.c)
      * оказалось временно переполнено и RawTcpServer_SendAsync() не
-     * принял батч, а в очереди уже ждал СЛЕДУЮЩИЙ resp именно этого
-     * клиента. Держим его тут, чтобы не терять и не ломать порядок
-     * байт на линии -- см. ClientHandler_PollTx(). */
+     * принял батч. ИНВАРИАНТ: пока pending_resp_valid, ничего новее в
+     * tx_batch этого клиента не дописывается -- иначе нарушится порядок
+     * байт на линии. */
     eth_resp_msg_t pending_resp;
     uint8_t        pending_resp_valid;
 
     /* --- диагностика --- */
     uint32_t dropped_rx_cmd_ring;
-    uint32_t dropped_eth_to_core;
+    uint32_t dropped_eth_to_core;      /* НЕ потери: сколько раз eth_to_core была полна и команда ждала в pending_cmd */
     uint32_t tcp_send_fail_count;
     uint32_t dropped_cmd_too_long;     /* ClientHandler_PushCmdToRxRing: len >= ETH_CMD_MAX_LEN */
     uint32_t dropped_line_too_long;    /* ClientHandler_InputBytes: строка длиннее rx_line_buf */
-    uint32_t dropped_resp_overflow;    /* два resp подряд не влезли, пока первый ещё pending -- практически недостижимо, см. ClientHandler_PollTx() */
+    uint32_t dropped_resp_overflow;    /* РЕАЛЬНЫЕ потери ответов: TX к ПК застрял, а pending_resp уже занят */
 } client_slot_t;
 
 static client_slot_t g_clients[MAX_CLIENTS];
@@ -149,10 +146,8 @@ static int ClientHandler_PushCmdToRxRing(uint8_t id, const char *cmd)
     {
         osKernelUnlock();
         c->dropped_rx_cmd_ring++;
-        /* Первый же дроп печатаем сразу -- порог "раз в 100" удобен при
-         * массовом переполнении, но единичную редкую потерю (ровно наш
-         * случай -- 1 кадр за весь прогон) с таким порогом в лог
-         * вообще никогда не попал бы. */
+        /* Первый же дроп печатаем сразу -- единичная редкая потеря с
+         * порогом "раз в 100" в лог вообще никогда не попала бы. */
         if ((c->dropped_rx_cmd_ring == 1U) || ((c->dropped_rx_cmd_ring % 100U) == 0U))
         {
             DebugUART_Print("[CLIENT] id=%u ch%u RX cmd ring drops=%lu used=%lu free=%lu\r\n",
@@ -252,9 +247,7 @@ static void ClientHandler_DrainRxCmdsToCore(uint8_t id)
             c->pending_cmd_valid = 1;
             c->dropped_eth_to_core++;
 
-            /* Та же логика: первая потеря -- сразу в лог, дальше не
-             * чаще раза в 1000, чтобы не захлёстывать UART при
-             * длительном заторе. */
+            /* Первое ожидание -- сразу в лог, дальше не чаще раза в 1000 */
             if ((c->dropped_eth_to_core == 1U) || ((c->dropped_eth_to_core % 1000U) == 0U))
             {
                 DebugUART_Print("[CLIENT] id=%u ch%u eth_to_core full count=%lu rx_used=%lu\r\n",
@@ -324,23 +317,11 @@ void ClientHandler_InputBytes(uint8_t client_id, const uint8_t *data, size_t len
 /*
  * Пытается протолкнуть то, что накопилось в c->tx_batch, в TX-кольцо
  * платы (raw_tcp_server.c: RawTcpServer_SendAsync -> RawTcp_TxPush).
- *
- * ГЛАВНОЕ ОТЛИЧИЕ от старой версии: при неудаче (кольцо клиента
- * временно переполнено -- бывает при большом burst'е, когда за один
- * проход ClientHandler_PollTx() успевает надробить и протолкнуть
- * несколько батчей по 1024 байта подряд, а TCP-кольцо клиента не
- * успевает освободиться между ними) батч НЕ обнуляется и НЕ
- * выбрасывается -- он остаётся в tx_batch как есть и будет повторно
- * предложен на следующем тике (ClientHandlerTask крутится каждую
- * 1 мс, а значит и RawTcp_TryFlush успевает освободить место). Именно
- * отсюда раньше терялись кадры при burst >= ~310-320: старая версия
- * при неудаче просто делала c->tx_len = 0, выкидывая уже готовый к
- * отправке батч навсегда, а счётчик неудач печатался в лог только
- * раз в 100 -- единичные потери (7-8 из 320) туда никогда не попадали.
+ * При неудаче батч НЕ обнуляется -- остаётся в tx_batch и будет повторно
+ * предложен на следующем тике.
  *
  * Возвращает 1, если батч пуст или успешно протолкнут (tx_len = 0
- * после вызова), и 0, если протолкнуть не удалось (tx_len не менялся,
- * нужно повторить попытку позже).
+ * после вызова), и 0, если протолкнуть не удалось (tx_len не менялся).
  */
 static int ClientHandler_FlushTxBatch(client_slot_t *c, uint8_t client_id)
 {
@@ -356,8 +337,7 @@ static int ClientHandler_FlushTxBatch(client_slot_t *c, uint8_t client_id)
 #else
     if (!RawTcpServer_HasClient(client_id))
     {
-        /* клиента уже нет -- отправлять некому, эти байты теперь
-         * действительно никому не нужны, отбрасываем осознанно */
+        /* клиента уже нет -- отправлять некому, отбрасываем осознанно */
         c->tx_len = 0;
         return 1;
     }
@@ -366,13 +346,13 @@ static int ClientHandler_FlushTxBatch(client_slot_t *c, uint8_t client_id)
     if (send_rc != 0)
     {
         c->tcp_send_fail_count++;
-        if ((c->tcp_send_fail_count == 1U) || ((c->tcp_send_fail_count % 100U) == 0U))
+        if ((c->tcp_send_fail_count == 1U) || ((c->tcp_send_fail_count % 1000U) == 0U))
         {
             DebugUART_Print("[CLIENT] id=%u TCP send fails=%lu last_rc=%d "
                             "(TX-кольцо платы переполнено, батч НЕ потерян -- ждём следующего тика)\r\n",
                             (unsigned)client_id, (unsigned long)c->tcp_send_fail_count, send_rc);
         }
-        return 0;   /* батч остаётся в tx_batch как есть -- попробуем снова через ~1 мс */
+        return 0;   /* батч остаётся в tx_batch как есть */
     }
 
     c->tx_len = 0;
@@ -380,32 +360,51 @@ static int ClientHandler_FlushTxBatch(client_slot_t *c, uint8_t client_id)
 #endif
 }
 
+/*
+ * Пристраивает отложенный pending_resp клиента в его tx_batch (при
+ * необходимости сначала проталкивая батч). Возвращает 1, если отложенного
+ * ответа нет или он успешно пристроен (можно дописывать новые), и 0, если
+ * он всё ещё висит (новые ответы этого клиента дописывать НЕЛЬЗЯ -- они
+ * обогнали бы отложенный).
+ */
+static int ClientHandler_TryPlacePending(client_slot_t *c, uint8_t client_id)
+{
+    size_t resp_len;
+
+    if (!c->pending_resp_valid) { return 1; }
+
+    resp_len = strlen(c->pending_resp.data);
+    if ((resp_len == 0U) || (resp_len > CLIENT_TX_BATCH_SIZE))
+    {
+        c->pending_resp_valid = 0;
+        return 1;
+    }
+
+    if ((c->tx_len + resp_len) > CLIENT_TX_BATCH_SIZE)
+    {
+        if (!ClientHandler_FlushTxBatch(c, client_id)) { return 0; }
+    }
+
+    memcpy(&c->tx_batch[c->tx_len], c->pending_resp.data, resp_len);
+    c->tx_len += resp_len;
+    c->pending_resp_valid = 0;
+    return 1;
+}
+
 void ClientHandler_PollTx(void)
 {
     uint32_t drained = 0;
 
-    /* Сначала -- если на прошлом тике для какого-то клиента ответ не
-     * удалось протолкнуть в TX-кольцо (оно было переполнено), пробуем
-     * пристроить застрявшее СНАЧАЛА: иначе нарушится порядок байт на
-     * линии (новый resp того же клиента не может обойти застрявший
-     * предыдущий). */
+    /* 1. Сначала пристраиваем застрявшее с прошлого тика -- оно старше
+     *    всего, что сейчас лежит в core_to_eth_queue. */
     for (uint8_t id = 0; id < MAX_CLIENTS; id++)
     {
         client_slot_t *c = &g_clients[id];
-        size_t resp_len;
-
-        if (!c->pending_resp_valid) { continue; }
-        if (!ClientHandler_FlushTxBatch(c, id)) { continue; }  /* ещё не освободилось -- попробуем на следующем тике */
-
-        resp_len = strlen(c->pending_resp.data);
-        if ((resp_len > 0U) && (resp_len <= CLIENT_TX_BATCH_SIZE))
-        {
-            memcpy(&c->tx_batch[c->tx_len], c->pending_resp.data, resp_len);
-            c->tx_len += resp_len;
-        }
-        c->pending_resp_valid = 0;
+        if (!c->in_use) { continue; }
+        (void)ClientHandler_TryPlacePending(c, id);
     }
 
+    /* 2. Раскладываем новые ответы по клиентам. */
     for (;;)
     {
         eth_resp_msg_t resp;
@@ -427,34 +426,30 @@ void ClientHandler_PollTx(void)
         resp_len = strlen(resp.data);
         if (resp_len == 0U) { continue; }
 
+        /* Пока у клиента висит более старый ответ, этот новый некуда
+         * поставить, не нарушив порядок -- это реальная потеря (TX к ПК
+         * застрял настолько, что не влезает даже один отложенный). */
+        if (!ClientHandler_TryPlacePending(c, resp.client_id))
+        {
+            c->dropped_resp_overflow++;
+            if ((c->dropped_resp_overflow == 1U) || ((c->dropped_resp_overflow % 1000U) == 0U))
+            {
+                DebugUART_Print("[CLIENT] id=%u ERROR: resp overflow (TX к ПК застрял), dropped total=%lu\r\n",
+                                (unsigned)resp.client_id,
+                                (unsigned long)c->dropped_resp_overflow);
+            }
+            continue;
+        }
+
         if ((c->tx_len + resp_len) > CLIENT_TX_BATCH_SIZE)
         {
             if (!ClientHandler_FlushTxBatch(c, resp.client_id))
             {
-                /* Кольцо платы переполнено -- старый батч остаётся в
-                 * tx_batch на следующий тик. Текущий resp при этом ЕЩЁ
-                 * НЕ потерян (он только что вычитан из общей очереди) --
-                 * кладём его в pending_resp этого клиента и идём дальше
-                 * по очереди: другие клиенты не должны ждать из-за
-                 * одного застрявшего. */
-                if (!c->pending_resp_valid)
-                {
-                    c->pending_resp = resp;
-                    c->pending_resp_valid = 1;
-                }
-                else
-                {
-                    /* Два подряд застрявших resp у одного клиента --
-                     * практически недостижимо (TCP ACK возвращается за
-                     * доли мс, тик ClientHandlerTask -- 1 мс), но если
-                     * всё же случилось -- не молчим, как раньше, а сразу
-                     * видно в логе. */
-                    c->dropped_resp_overflow++;
-                    DebugUART_Print("[CLIENT] id=%u ERROR: resp overflow "
-                                    "(два подряд не влезли), dropped total=%lu\r\n",
-                                    (unsigned)resp.client_id,
-                                    (unsigned long)c->dropped_resp_overflow);
-                }
+                /* Батч не протолкнулся -- текущий ответ ещё не потерян,
+                 * откладываем его (pending_resp гарантированно свободен:
+                 * TryPlacePending выше вернул 1). */
+                c->pending_resp = resp;
+                c->pending_resp_valid = 1;
                 continue;
             }
         }
@@ -463,11 +458,20 @@ void ClientHandler_PollTx(void)
         c->tx_len += resp_len;
     }
 
+    /* 3. Проталкиваем накопленное; если батч ушёл, а отложенный ответ
+     *    остался -- пристраиваем и его и проталкиваем ещё раз. */
     for (uint8_t id = 0; id < MAX_CLIENTS; id++)
     {
         client_slot_t *c = &g_clients[id];
         if (!c->in_use) { continue; }
-        (void)ClientHandler_FlushTxBatch(c, id);
+
+        if (ClientHandler_FlushTxBatch(c, id) && c->pending_resp_valid)
+        {
+            if (ClientHandler_TryPlacePending(c, id))
+            {
+                (void)ClientHandler_FlushTxBatch(c, id);
+            }
+        }
     }
 }
 
@@ -484,11 +488,11 @@ void ClientHandler_ClientConnected(uint8_t client_id, uint8_t channel_id)
     c->rx_cmd_tail = 0;
     osKernelUnlock();
 
-    c->rx_line_pos          = 0;
-    c->pending_cmd_valid    = 0;
-    c->pending_resp_valid   = 0;
-    c->tx_len               = 0;
-    c->channel_id           = channel_id;
+    c->rx_line_pos           = 0;
+    c->pending_cmd_valid     = 0;
+    c->pending_resp_valid    = 0;
+    c->tx_len                = 0;
+    c->channel_id            = channel_id;
     c->dropped_rx_cmd_ring   = 0;
     c->dropped_eth_to_core   = 0;
     c->dropped_cmd_too_long  = 0;
@@ -521,7 +525,7 @@ void ClientHandler_ClientDisconnected(uint8_t client_id)
     c->in_use             = 0;
 
     DebugUART_Print("[CLIENT] id=%u disconnected, slot freed\r\n", (unsigned)client_id);
-    DebugUART_Print("[CLIENT] id=%u drop stats: rx_cmd_ring=%lu eth_to_core=%lu "
+    DebugUART_Print("[CLIENT] id=%u drop stats: rx_cmd_ring=%lu eth_to_core_waits=%lu "
                     "cmd_too_long=%lu line_too_long=%lu tcp_send_fail=%lu resp_overflow=%lu\r\n",
                     (unsigned)client_id,
                     (unsigned long)c->dropped_rx_cmd_ring,
@@ -563,6 +567,11 @@ static void ClientHandlerTask(void *argument)
         }
 
         ClientHandler_PollTx();
+
+        /* Страховка от потерянного пробуждения RX back-pressure: если у
+         * кого-то висит отложенный TCP-хвост, раз в тик просим tcpip-поток
+         * проверить, не появилось ли место. */
+        RawTcpServer_KickPendingRx();
 
         osDelay(1);
     }
