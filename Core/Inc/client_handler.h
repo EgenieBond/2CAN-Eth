@@ -17,12 +17,11 @@
 #include <stddef.h>
 
 void ClientHandlerTask_Start(void);
-
 void ClientHandler_ClientConnected(uint8_t client_id, uint8_t channel_id);
 void ClientHandler_ClientDisconnected(uint8_t client_id);
-
 void ClientHandler_InputBytes(uint8_t client_id, const uint8_t *data, size_t len);
 void ClientHandler_PollTx(void);
+uint32_t ClientHandler_TakeRecvCredit(uint8_t client_id);
 
 /*
  * Сколько свободных байт сейчас в RX-кольце этого клиента (там, где

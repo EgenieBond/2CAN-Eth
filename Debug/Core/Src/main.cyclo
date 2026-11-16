@@ -7,5 +7,5 @@
 ../Core/Src/main.c:536:13:MX_GPIO_Init	1
 ../Core/Src/main.c:560:13:CanOnlyDirectTest_Run	10
 ../Core/Src/main.c:794:6:StartDefaultTask	1
-../Core/Src/main.c:877:6:MPU_Config	5
-../Core/Src/main.c:939:6:Error_Handler	1
+../Core/Src/main.c:882:6:MPU_Config	5
+../Core/Src/main.c:965:6:Error_Handler	1

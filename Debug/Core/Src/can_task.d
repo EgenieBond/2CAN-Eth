@@ -11,8 +11,8 @@ Core/Src/can_task.o: ../Core/Src/can_task.c ../Core/Inc/can_task.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h \
  ../Core/Inc/app_queues.h ../Core/Inc/can_types.h \
- ../Core/Inc/debug_uart.h ../Core/Inc/can_types.h ../Core/Inc/main.h \
- ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
+ ../Core/Inc/debug_uart.h ../Core/Inc/event_log.h ../Core/Inc/can_types.h \
+ ../Core/Inc/main.h ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_def.h \
@@ -61,6 +61,7 @@ Core/Src/can_task.o: ../Core/Src/can_task.c ../Core/Inc/can_task.h \
 ../Core/Inc/app_queues.h:
 ../Core/Inc/can_types.h:
 ../Core/Inc/debug_uart.h:
+../Core/Inc/event_log.h:
 ../Core/Inc/can_types.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:

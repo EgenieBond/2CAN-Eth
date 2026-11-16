@@ -1,3 +1,5 @@
-../Core/Src/debug_uart.c:27:6:DebugUART_InitMutex	2
+../Core/Src/debug_uart.c:29:6:DebugUART_InitMutex	2
 ../Core/Src/debug_uart.c:37:6:DebugUART_Init	1
-../Core/Src/debug_uart.c:42:6:DebugUART_Print	5
+../Core/Src/debug_uart.c:42:13:DebugUART_VPrintf	5
+../Core/Src/debug_uart.c:64:6:DebugUART_Printf	1
+../Core/Src/debug_uart.c:73:6:DebugUART_Print	2

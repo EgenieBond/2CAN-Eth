@@ -873,7 +873,12 @@ void StartDefaultTask(void *argument)
 #endif
 }
 
- /* MPU Configuration */
+/* MPU Configuration */
+/* MPU Configuration */
+/* Адрес некэшируемого блока RX-буферов Ethernet -- задаётся линкер-скриптом
+ * (секция .Rx_PoolSection в RAM_D1, 32 КБ на границе 32 КБ). */
+extern uint8_t __eth_rx_nc_start__[];
+
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
@@ -923,11 +928,32 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
+  /* -------- Region 3: RX-буферы Ethernet в RAM_D1, 32KB, NON-CACHEABLE --------
+   * Лежит внутри region 0 (кэшируемой RAM_D1); регион с большим номером
+   * имеет приоритет, поэтому этот блок становится некэшируемым.
+   * DMA пишет принятые кадры прямо в память, мимо кэша -- без этого
+   * процессор мог бы читать из кэша старое содержимое буфера.
+   * Тип: Normal, Non-cacheable (TEX=1, C=0, B=0) -- в отличие от
+   * Strongly-ordered (TEX=0, C=0, B=0) допускает невыровненный доступ,
+   * а lwIP читает заголовки пакетов по невыровненным адресам. */
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER3;
+  MPU_InitStruct.BaseAddress      = (uint32_t)__eth_rx_nc_start__;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_32KB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
   /* Включаем кеши (после MPU!) */
   SCB_EnableICache();
-  SCB_EnableDCache();    /* временно выключено для отладки Ethernet */
+  SCB_EnableDCache();
   __DSB();
   __ISB();
 }

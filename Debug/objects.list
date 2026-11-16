@@ -7,6 +7,7 @@
 "./Core/Src/eth_loopback_test.o"
 "./Core/Src/eth_raw_test.o"
 "./Core/Src/ethernet_task.o"
+"./Core/Src/event_log.o"
 "./Core/Src/fake_client_source.o"
 "./Core/Src/freertos.o"
 "./Core/Src/main.o"

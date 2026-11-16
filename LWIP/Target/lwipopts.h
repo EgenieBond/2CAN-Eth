@@ -141,23 +141,27 @@ extern "C" {
 /* ===== TCP resources ===== */
 #define MEMP_NUM_TCP_PCB                  10
 #define MEMP_NUM_TCP_PCB_LISTEN           6
-//#define MEMP_NUM_TCP_SEG  				  128    //32
 #define MEMP_NUM_TCPIP_MSG_INPKT          32	//128 UDP
 #define MEMP_NUM_SYS_TIMEOUT              10
 
 #define TCP_MSS                           1460
-//#define TCP_SND_BUF      				  (24 * TCP_MSS)	//8
-//#define TCP_WND          				  (24 * TCP_MSS)	//8
-
-//#define MEM_SIZE                		  (8 * 1024)	//12
 #define PBUF_POOL_BUFSIZE                 1536
 
 /* основные буферы */
-#define MEMP_NUM_TCP_SEG                  96	/* было TCP_SND_QUEUELEN = 4*8 = 32 */
+#undef  TCP_SND_QUEUELEN
+#define TCP_SND_QUEUELEN                  (8 * TCP_SND_BUF / TCP_MSS)	/* = 64 сегмента на соединение */
+#define MEMP_NUM_TCP_SEG                  160	/* общий пул на ВСЕ соединения */
 #define TCP_SND_BUF                       (8 * TCP_MSS)
-#define TCP_WND                           (4 * TCP_MSS)   //было 12
+#define TCP_WND                           (4 * TCP_MSS)	/* проверяется _Static_assert в client_handler.c */
 #define PBUF_POOL_SIZE                    24
-#define MEM_SIZE                          (16 * 1024)
+#define MEM_SIZE                          (32 * 1024)	/* было 16 КБ. */
+
+/* Таймеры TCP lwIP */
+#undef  TCP_TMR_INTERVAL
+#define TCP_TMR_INTERVAL    			  25
+
+#undef  TCPIP_THREAD_PRIO
+#define TCPIP_THREAD_PRIO   			  osPriorityHigh
 
 /* ===== ARP ===== */
 #define ARP_TABLE_SIZE                    10

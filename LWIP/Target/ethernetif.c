@@ -109,7 +109,7 @@ typedef struct __attribute__((aligned(32)))
 } RxBuff_t;
 
 /* Memory Pool Declaration */
-#define ETH_RX_BUFFER_CNT             13U
+#define ETH_RX_BUFFER_CNT             20U
 LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX PBUF pool");
 
 /* Variable Definitions */
@@ -712,14 +712,33 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   * @retval None
   */
 
+volatile uint32_t g_eth_err_rbu   = 0;  /* RX: у DMA нет свободного дескриптора/буфера -- входящий кадр потерян */
+volatile uint32_t g_eth_err_rps   = 0;  /* RX: процесс приёма DMA остановился */
+volatile uint32_t g_eth_err_rwt   = 0;  /* RX: watchdog (принят слишком длинный кадр) */
+volatile uint32_t g_eth_err_tps   = 0;  /* TX: процесс передачи DMA остановился */
+volatile uint32_t g_eth_err_eti   = 0;  /* TX: early transmit interrupt */
+volatile uint32_t g_eth_err_fbe   = 0;  /* фатальная ошибка шины DMA */
+volatile uint32_t g_eth_err_cde   = 0;  /* ошибка дескриптора контекста */
+volatile uint32_t g_eth_err_other = 0;  /* ни один из битов выше */
+
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
   uint32_t dma_err = HAL_ETH_GetDMAError(handlerEth);
+  uint8_t  known   = 0;
 
   g_tx_err_cnt++;
   g_eth_dma_error_count++;
   g_eth_dma_last_error = dma_err;
   g_eth_hal_last_error = HAL_ETH_GetError(handlerEth);
+
+  if ((dma_err & ETH_DMACSR_RBU) != 0U) { g_eth_err_rbu++; known = 1; }
+  if ((dma_err & ETH_DMACSR_RPS) != 0U) { g_eth_err_rps++; known = 1; }
+  if ((dma_err & ETH_DMACSR_RWT) != 0U) { g_eth_err_rwt++; known = 1; }
+  if ((dma_err & ETH_DMACSR_TPS) != 0U) { g_eth_err_tps++; known = 1; }
+  if ((dma_err & ETH_DMACSR_ETI) != 0U) { g_eth_err_eti++; known = 1; }
+  if ((dma_err & ETH_DMACSR_FBE) != 0U) { g_eth_err_fbe++; known = 1; }
+  if ((dma_err & ETH_DMACSR_CDE) != 0U) { g_eth_err_cde++; known = 1; }
+  if (!known) { g_eth_err_other++; }
 
   osSemaphoreRelease(TxPktSemaphore);
 
@@ -727,6 +746,17 @@ void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
   {
     osSemaphoreRelease(RxPktSemaphore);
   }
+}
+
+void ETH_PrintErrorBreakdown(void)
+{
+  DebugUART_Print("[ETH] DMA errors by cause: RX: rbu=%lu rps=%lu rwt=%lu | TX: tps=%lu eti=%lu | "
+                  "fbe=%lu cde=%lu other=%lu | last=0x%08lX\r\n",
+                  (unsigned long)g_eth_err_rbu, (unsigned long)g_eth_err_rps,
+                  (unsigned long)g_eth_err_rwt, (unsigned long)g_eth_err_tps,
+                  (unsigned long)g_eth_err_eti, (unsigned long)g_eth_err_fbe,
+                  (unsigned long)g_eth_err_cde, (unsigned long)g_eth_err_other,
+                  (unsigned long)g_eth_dma_last_error);
 }
 
 /* USER CODE BEGIN 4 */
@@ -828,7 +858,7 @@ static void low_level_init(struct netif *netif)
   memset(&attributes, 0, sizeof(attributes));
   attributes.name = "EthTx";
   attributes.stack_size = 1024;
-  attributes.priority = osPriorityAboveNormal;
+  attributes.priority = osPriorityHigh;
   g_TxTaskHandle = osThreadNew(EthTxTask, NULL, &attributes);
 
   if (g_TxTaskHandle == NULL)
@@ -1058,7 +1088,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
          * момент -- чтобы понять, застревает ли именно TX-кольцо,
          * или первопричина -- исчерпание RX-буферов (RBU), которое
          * тянет TX за собой. */
-        DebugUART_Print("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX "
+        LOG_DBG("[ETH] TX FAIL st=%d hal_err=0x%08lX dma_err=0x%08lX "
                         "buf_in_use=%lu rx_alloc_ok=%lu rx_alloc_fail=%lu\r\n",
                         (int)st,
                         (unsigned long)HAL_ETH_GetError(&heth),
