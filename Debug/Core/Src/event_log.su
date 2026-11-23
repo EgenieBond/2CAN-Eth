@@ -1,0 +1,5 @@
+../Core/Src/event_log.c:56:12:EventLog_IsBackground	16	static
+../Core/Src/event_log.c:77:21:EventLog_FindOrCreate	32	static
+../Core/Src/event_log.c:97:6:EventLog_Add	88	static,ignoring_inline_asm
+../Core/Src/event_log.c:167:13:EventLog_SrcName	24	static
+../Core/Src/event_log.c:174:6:EventLog_PrintAndReset	256	static

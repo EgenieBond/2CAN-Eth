@@ -1,0 +1,5 @@
+../Core/Src/event_log.c:56:12:EventLog_IsBackground	4
+../Core/Src/event_log.c:77:21:EventLog_FindOrCreate	5
+../Core/Src/event_log.c:97:6:EventLog_Add	21
+../Core/Src/event_log.c:167:13:EventLog_SrcName	3
+../Core/Src/event_log.c:174:6:EventLog_PrintAndReset	19
