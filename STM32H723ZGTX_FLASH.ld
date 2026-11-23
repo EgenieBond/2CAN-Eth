@@ -133,12 +133,8 @@ SECTIONS
     . = ALIGN(32);
   } >RAM_D2
 
-  .Rx_PoolSection (NOLOAD) :
-  {
-    . = ALIGN(32);
-    *(.Rx_PoolSection)
-    . = ALIGN(32);
-  } >RAM_D2
+  /* .Rx_PoolSection перенесена в RAM_D1 (см. ниже, после .bss): в RAM_D2
+     для дополнительных RX-буферов не оставалось места (свободно 320 байт). */
 
   /* Явный отступ между RX- и TX-областями DMA. Цель — физически
      развести приём и передачу как можно дальше друг от друга внутри
@@ -186,6 +182,23 @@ SECTIONS
 	  __lwip_dtcm_end__ = .;
 	} >DTCMRAM
 
+	/* ===== lwIP heap (MEM_SIZE) в DTCMRAM =====
+	   Ethernet-DMA к куче не обращается: low_level_output() копирует кадр
+	   в g_TxPool (RAM_D2) перед передачей, а RX идёт через RX_POOL (некэшируемый блок в RAM_D1).
+	   Поэтому кучу можно держать в DTCM: она быстрая, не кэшируется и
+	   почти свободна, а RAM_D1 разгружается на 16 КБ.
+	   Размер = MEM_SIZE (32 КБ) + запас 256 байт: lwIP использует
+	   MEM_SIZE плюс две служебные структуры struct mem.
+	   Если меняешь MEM_SIZE в lwipopts.h -- поменяй и размер здесь. */
+	.lwip_heap (NOLOAD) :
+	{
+	  . = ALIGN(32);
+	  __lwip_heap_start__ = .;
+	  . = . + 0x8100;
+	  __lwip_heap_end__ = .;
+	  . = ALIGN(32);
+	} >DTCMRAM
+
 
   /* Uninitialized data section */
   . = ALIGN(4);
@@ -202,18 +215,32 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM_D1
-  
-  
-    /* ===== lwIP heap region (must NOT overlap .bss / FreeRTOS heap) ===== */
-.lwip_heap (NOLOAD) :
-{
-  . = ALIGN(32);
-  __lwip_heap_start__ = .;
-  . = . + 0x4000;            /* было 0xC000 (48KB), стало 0x8000 (32KB) */
-  __lwip_heap_end__ = .;
-  . = ALIGN(32);
-} >RAM_D1
 
+  /* ===== RX-буферы Ethernet (RX_POOL, zero-copy) в RAM_D1 =====
+     Перенесены из RAM_D2: там было место только на 13 буферов, и под
+     нагрузкой они кончались (alloc_fail/RBU) -> плата теряла входящие
+     кадры от ПК -> TCP ждал таймера повтора ~1.2 с.
+
+     Ethernet-DMA имеет доступ к AXI SRAM (RAM_D1). Но RAM_D1 кэшируемая
+     (MPU region 0), а DMA пишет в память мимо кэша. Поэтому эта область
+     -- ровно 32 КБ на границе 32 КБ -- отдельно помечена некэшируемой
+     (MPU region 3 в MPU_Config(), адрес берётся из __eth_rx_nc_start__).
+     Регион MPU обязан быть размером степени двойки и выровнен по своему
+     размеру -- отсюда ALIGN(0x8000) и фиксированный размер 0x8000.
+
+     Вмещает до 20 буферов RxBuff_t по 1600 байт (20 * 1600 + 3 = 32003).
+     Если RX_POOL не влезет, строка ". = __eth_rx_nc_start__ + 0x8000"
+     даст ошибку линковки (счётчик не может идти назад) -- это защита. */
+  .Rx_PoolSection (NOLOAD) :
+  {
+    . = ALIGN(0x8000);
+    __eth_rx_nc_start__ = .;
+    *(.Rx_PoolSection)
+    . = __eth_rx_nc_start__ + 0x8000;
+    __eth_rx_nc_end__ = .;
+  } >RAM_D1
+  
+  
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack :
   {

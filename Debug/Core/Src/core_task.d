@@ -13,7 +13,7 @@ Core/Src/core_task.o: ../Core/Src/core_task.c ../Core/Inc/core_task.h \
  ../Core/Inc/app_queues.h ../Core/Inc/can_types.h \
  ../Core/Inc/slcan_parser.h ../Core/Inc/slcan_types.h \
  ../Core/Inc/slcan_types.h ../Core/Inc/debug_uart.h \
- ../Core/Inc/can_task.h
+ ../Core/Inc/event_log.h ../Core/Inc/can_task.h
 ../Core/Inc/core_task.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h:
@@ -32,4 +32,5 @@ Core/Src/core_task.o: ../Core/Src/core_task.c ../Core/Inc/core_task.h \
 ../Core/Inc/slcan_types.h:
 ../Core/Inc/slcan_types.h:
 ../Core/Inc/debug_uart.h:
+../Core/Inc/event_log.h:
 ../Core/Inc/can_task.h:

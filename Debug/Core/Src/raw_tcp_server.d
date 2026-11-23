@@ -80,7 +80,7 @@ Core/Src/raw_tcp_server.o: ../Core/Src/raw_tcp_server.c \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/timeouts.h \
  ../Middlewares/Third_Party/LwIP/src/include/lwip/sys.h \
  ../Middlewares/Third_Party/LwIP/system/arch/sys_arch.h \
- ../Core/Inc/debug_uart.h
+ ../Core/Inc/debug_uart.h ../Core/Inc/event_log.h
 ../Core/Inc/raw_tcp_server.h:
 ../Core/Inc/client_handler.h:
 ../Core/Inc/core_task.h:
@@ -166,3 +166,4 @@ Core/Src/raw_tcp_server.o: ../Core/Src/raw_tcp_server.c \
 ../Middlewares/Third_Party/LwIP/src/include/lwip/sys.h:
 ../Middlewares/Third_Party/LwIP/system/arch/sys_arch.h:
 ../Core/Inc/debug_uart.h:
+../Core/Inc/event_log.h:

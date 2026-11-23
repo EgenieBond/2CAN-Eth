@@ -49,34 +49,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := Eth_Module
+BUILD_ARTIFACT_NAME := Eth_Module_flash
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-Eth_Module.elf \
+Eth_Module_flash.elf \
 
 MAP_FILES += \
-Eth_Module.map \
+Eth_Module_flash.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-Eth_Module.list \
+Eth_Module_flash.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: Eth_Module.elf secondary-outputs
+main-build: Eth_Module_flash.elf secondary-outputs
 
 # Tool invocations
-Eth_Module.elf Eth_Module.map: $(OBJS) $(USER_OBJS) C:\Users\Egenie\STM32CubeIDE\workspace_1.17.0\Eth_Module\STM32H723ZGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "Eth_Module.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\Egenie\STM32CubeIDE\workspace_1.17.0\Eth_Module\STM32H723ZGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Eth_Module.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Eth_Module_flash.elf Eth_Module_flash.map: $(OBJS) $(USER_OBJS) C:\Users\Egenie\STM32CubeIDE\workspace_1.17.0\Eth_Module_flash\STM32H723ZGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "Eth_Module_flash.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\Egenie\STM32CubeIDE\workspace_1.17.0\Eth_Module_flash\STM32H723ZGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Eth_Module_flash.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -85,14 +85,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-Eth_Module.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "Eth_Module.list"
+Eth_Module_flash.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "Eth_Module_flash.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) Eth_Module.elf Eth_Module.list Eth_Module.map default.size.stdout
+	-$(RM) Eth_Module_flash.elf Eth_Module_flash.list Eth_Module_flash.map default.size.stdout
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)

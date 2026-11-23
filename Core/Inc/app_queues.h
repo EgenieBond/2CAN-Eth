@@ -30,7 +30,7 @@
 #define NUM_CHANNELS       2U
 #define CHANNEL_ID_INVALID 0xFFU
 
-#define MAX_CLIENTS        8U
+#define MAX_CLIENTS        4U
 
 typedef struct
 {

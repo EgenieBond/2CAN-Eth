@@ -42,6 +42,7 @@
 #include "slcan_parser.h"
 #include "slcan_types.h"
 #include "debug_uart.h"
+#include "event_log.h"
 #include "can_task.h"
 
 #include <string.h>
@@ -92,11 +93,11 @@ static void CoreTask_PrintBitrate(const char *prefix, uint8_t bitrate_code, uint
 {
     if (bitrate_code != 0xFFU)
     {
-        DebugUART_Print("%sS%u -> %lu bit/s\r\n", prefix, (unsigned)bitrate_code, (unsigned long)bitrate_bps);
+        LOG_INFO("%sS%u -> %lu bit/s\r\n", prefix, (unsigned)bitrate_code, (unsigned long)bitrate_bps);
     }
     else
     {
-        DebugUART_Print("%sdirect %lu bit/s\r\n", prefix, (unsigned long)bitrate_bps);
+        LOG_INFO("%sdirect %lu bit/s\r\n", prefix, (unsigned long)bitrate_bps);
     }
 }
 
@@ -106,9 +107,10 @@ static void CoreTask_SendResponse(const eth_resp_msg_t *resp)
     {
         static uint32_t core_to_eth_full_count = 0;
         core_to_eth_full_count++;
+        EventLog_Add(EVLOG_CORE_TO_ETH_DROP, EVLOG_SRC_CLIENT(resp->client_id), 1U);
         if ((core_to_eth_full_count == 1U) || ((core_to_eth_full_count % 200U) == 0U))
         {
-            DebugUART_Print("[CORE] ERROR: core_to_eth_queue full (count=%lu)\r\n",
+            LOG_DBG("[CORE] ERROR: core_to_eth_queue full (count=%lu)\r\n",
                             (unsigned long)core_to_eth_full_count);
         }
     }
@@ -139,7 +141,7 @@ static int CoreTask_TryOpenChannel(uint8_t id, core_can_mode_t desired_mode, eth
     if (cs->mode != CORE_CAN_MODE_CLOSED)
     {
         snprintf(resp->data, sizeof(resp->data), "\a");
-        DebugUART_Print("[CORE] id=%u ch%u ERROR: channel already open by this client\r\n",
+        LOG_INFO("[CORE] id=%u ch%u ERROR: channel already open by this client\r\n",
                         (unsigned)id, (unsigned)ch);
         return -1;
     }
@@ -147,7 +149,7 @@ static int CoreTask_TryOpenChannel(uint8_t id, core_can_mode_t desired_mode, eth
 #if CORE_SLCAN_STRESS_TEST_NO_CAN
     cs->mode = desired_mode;
     snprintf(resp->data, sizeof(resp->data), "\r");
-    DebugUART_Print("[CORE] id=%u ch%u channel OPEN mode=%d (NO_CAN stress mode)\r\n",
+    LOG_INFO("[CORE] id=%u ch%u channel OPEN mode=%d (NO_CAN stress mode)\r\n",
                     (unsigned)id, (unsigned)ch, (int)desired_mode);
     return 0;
 #else
@@ -156,7 +158,7 @@ static int CoreTask_TryOpenChannel(uint8_t id, core_can_mode_t desired_mode, eth
         if (CanTask_Open(ch, desired_mode, cs->bitrate_bps) != 0)
         {
             snprintf(resp->data, sizeof(resp->data), "\a");
-            DebugUART_Print("[CORE] id=%u ch%u ERROR: failed to open CAN (first opener)\r\n",
+            LOG_INFO("[CORE] id=%u ch%u ERROR: failed to open CAN (first opener)\r\n",
                             (unsigned)id, (unsigned)ch);
             return -1;
         }
@@ -167,7 +169,7 @@ static int CoreTask_TryOpenChannel(uint8_t id, core_can_mode_t desired_mode, eth
         cs->mode = desired_mode;
 
         snprintf(resp->data, sizeof(resp->data), "\r");
-        DebugUART_Print("[CORE] id=%u ch%u channel OPEN mode=%d -- physically started bus\r\n",
+        LOG_INFO("[CORE] id=%u ch%u channel OPEN mode=%d -- physically started bus\r\n",
                         (unsigned)id, (unsigned)ch, (int)desired_mode);
         CoreTask_PrintBitrate("[CORE] active bitrate: ", cs->bitrate_code, cs->bitrate_bps);
         return 0;
@@ -177,7 +179,7 @@ static int CoreTask_TryOpenChannel(uint8_t id, core_can_mode_t desired_mode, eth
         if ((g_bus[ch].mode != desired_mode) || (g_bus[ch].bitrate_bps != cs->bitrate_bps))
         {
             snprintf(resp->data, sizeof(resp->data), "\a");
-            DebugUART_Print("[CORE] id=%u ch%u ERROR: bus busy with mode=%d bitrate=%lu, "
+            LOG_INFO("[CORE] id=%u ch%u ERROR: bus busy with mode=%d bitrate=%lu, "
                             "requested mode=%d bitrate=%lu -- conflict\r\n",
                             (unsigned)id, (unsigned)ch,
                             (int)g_bus[ch].mode, (unsigned long)g_bus[ch].bitrate_bps,
@@ -189,7 +191,7 @@ static int CoreTask_TryOpenChannel(uint8_t id, core_can_mode_t desired_mode, eth
         cs->mode = desired_mode;
 
         snprintf(resp->data, sizeof(resp->data), "\r");
-        DebugUART_Print("[CORE] id=%u ch%u channel OPEN mode=%d -- joined existing bus (open_count=%u)\r\n",
+        LOG_INFO("[CORE] id=%u ch%u channel OPEN mode=%d -- joined existing bus (open_count=%u)\r\n",
                         (unsigned)id, (unsigned)ch, (int)desired_mode,
                         (unsigned)g_bus[ch].open_client_count);
         return 0;
@@ -212,7 +214,7 @@ static void CoreTask_CloseChannel(uint8_t id, eth_resp_msg_t *resp)
 
 #if CORE_SLCAN_STRESS_TEST_NO_CAN
     snprintf(resp->data, sizeof(resp->data), "\r");
-    DebugUART_Print("[CORE] id=%u ch%u channel CLOSED (NO_CAN stress mode)\r\n", (unsigned)id, (unsigned)ch);
+    LOG_INFO("[CORE] id=%u ch%u channel CLOSED (NO_CAN stress mode)\r\n", (unsigned)id, (unsigned)ch);
 #else
     if (g_bus[ch].open_client_count > 0U) { g_bus[ch].open_client_count--; }
 
@@ -220,17 +222,17 @@ static void CoreTask_CloseChannel(uint8_t id, eth_resp_msg_t *resp)
     {
         if (CanTask_Close(ch) != 0)
         {
-            DebugUART_Print("[CORE] id=%u ch%u WARNING: CanTask_Close failed on last-closer\r\n",
+            LOG_INFO("[CORE] id=%u ch%u WARNING: CanTask_Close failed on last-closer\r\n",
                             (unsigned)id, (unsigned)ch);
         }
         g_bus[ch].mode = CORE_CAN_MODE_CLOSED;
         g_bus[ch].bitrate_bps = 0;
-        DebugUART_Print("[CORE] id=%u ch%u channel CLOSED -- was last opener, bus physically stopped\r\n",
+        LOG_INFO("[CORE] id=%u ch%u channel CLOSED -- was last opener, bus physically stopped\r\n",
                         (unsigned)id, (unsigned)ch);
     }
     else
     {
-        DebugUART_Print("[CORE] id=%u ch%u channel CLOSED -- bus stays open (open_count=%u)\r\n",
+        LOG_INFO("[CORE] id=%u ch%u channel CLOSED -- bus stays open (open_count=%u)\r\n",
                         (unsigned)id, (unsigned)ch, (unsigned)g_bus[ch].open_client_count);
     }
 
@@ -250,7 +252,7 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
 
     if (id >= MAX_CLIENTS)
     {
-        DebugUART_Print("[CORE] ERROR: invalid client_id=%u in command\r\n", (unsigned)id);
+        LOG_DBG("[CORE] ERROR: invalid client_id=%u in command\r\n", (unsigned)id);
         return CORE_CMD_DONE;
     }
 
@@ -272,7 +274,7 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
 
     if (Slcan_ParseCommand(cmd_msg->data, &parsed) != 0)
     {
-        DebugUART_Print("[CORE] id=%u parse ERROR: unsupported or invalid command\r\n", (unsigned)id);
+        LOG_DBG("[CORE] id=%u parse ERROR: unsupported or invalid command\r\n", (unsigned)id);
         snprintf(resp.data, sizeof(resp.data), "\a");
     }
     else
@@ -306,7 +308,7 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
                 if (cs->mode != CORE_CAN_MODE_CLOSED)
                 {
                     snprintf(resp.data, sizeof(resp.data), "\a");
-                    DebugUART_Print("[CORE] id=%u ERROR: bitrate change while channel open\r\n", (unsigned)id);
+                    LOG_DBG("[CORE] id=%u ERROR: bitrate change while channel open\r\n", (unsigned)id);
                 }
                 else
                 {
@@ -329,12 +331,12 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
                 if (cs->mode == CORE_CAN_MODE_CLOSED)
                 {
                     snprintf(resp.data, sizeof(resp.data), "\a");
-                    DebugUART_Print("[CORE] id=%u ERROR: cannot send frame, channel is CLOSED\r\n", (unsigned)id);
+                    LOG_DBG("[CORE] id=%u ERROR: cannot send frame, channel is CLOSED\r\n", (unsigned)id);
                 }
                 else if (cs->mode == CORE_CAN_MODE_LISTEN_ONLY)
                 {
                     snprintf(resp.data, sizeof(resp.data), "\a");
-                    DebugUART_Print("[CORE] id=%u ERROR: cannot send frame in LISTEN ONLY mode\r\n", (unsigned)id);
+                    LOG_DBG("[CORE] id=%u ERROR: cannot send frame in LISTEN ONLY mode\r\n", (unsigned)id);
                 }
                 else
                 {
@@ -356,7 +358,7 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
                         g_core_to_eth_backpressure++;
                         if ((g_core_to_eth_backpressure == 1U) || ((g_core_to_eth_backpressure % 10000U) == 0U))
                         {
-                            DebugUART_Print("[CORE] back-pressure: core_to_eth_queue full (events=%lu)\r\n",
+                            LOG_DBG("[CORE] back-pressure: core_to_eth_queue full (events=%lu)\r\n",
                                             (unsigned long)g_core_to_eth_backpressure);
                         }
                         return CORE_CMD_RETRY;
@@ -372,7 +374,7 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
                         uint32_t n = ++g_core_to_can_backpressure[cs->channel_id];
                         if ((n == 1U) || ((n % 10000U) == 0U))
                         {
-                            DebugUART_Print("[CORE] ch%u back-pressure: core_to_can_queue full (events=%lu)\r\n",
+                            LOG_DBG("[CORE] ch%u back-pressure: core_to_can_queue full (events=%lu)\r\n",
                                             (unsigned)cs->channel_id, (unsigned long)n);
                         }
                         return CORE_CMD_RETRY;
@@ -385,7 +387,7 @@ static core_cmd_result_t CoreTask_HandleEthCommand(const eth_cmd_msg_t *cmd_msg)
 
             default:
                 snprintf(resp.data, sizeof(resp.data), "\a");
-                DebugUART_Print("[CORE] id=%u ERROR: unsupported parsed command type\r\n", (unsigned)id);
+                LOG_DBG("[CORE] id=%u ERROR: unsupported parsed command type\r\n", (unsigned)id);
                 break;
         }
     }
@@ -405,7 +407,7 @@ static void CoreTask_HandleCanRx(uint8_t channel_id, const can_msg_t *can_msg)
 
     if ((can_msg->frame.Flags & CAN_FLAG_RTR) != 0U)
     {
-        DebugUART_Print("[CORE] ch%u CAN RX RTR: ID=0x%08lX DLC=%u FLAGS=0x%02X\r\n",
+        LOG_DBG("[CORE] ch%u CAN RX RTR: ID=0x%08lX DLC=%u FLAGS=0x%02X\r\n",
                         (unsigned)channel_id,
                         (unsigned long)can_msg->frame.Id,
                         (unsigned)can_msg->frame.Size,
@@ -414,7 +416,7 @@ static void CoreTask_HandleCanRx(uint8_t channel_id, const can_msg_t *can_msg)
 
     if (Slcan_FormatFrame(&can_msg->frame, formatted, sizeof(formatted)) != 0)
     {
-        DebugUART_Print("[CORE] ch%u ERROR: Slcan_FormatFrame failed\r\n", (unsigned)channel_id);
+        LOG_DBG("[CORE] ch%u ERROR: Slcan_FormatFrame failed\r\n", (unsigned)channel_id);
         return;
     }
 
@@ -486,20 +488,20 @@ static void CoreTask(void *argument)
     static uint32_t      pending_since_tick = 0;
     static uint32_t      pending_timeout_drops = 0;
 
-    DebugUART_Print("[CORE] CoreTask started\r\n");
+    LOG_INFO("[CORE] CoreTask started\r\n");
 #if CORE_SLCAN_STRESS_TEST_NO_CAN
-    DebugUART_Print("[CORE] MODE: SLCAN STRESS TEST WITHOUT CAN\r\n");
+    LOG_INFO("[CORE] MODE: SLCAN STRESS TEST WITHOUT CAN\r\n");
 #else
-    DebugUART_Print("[CORE] MODE: REAL CAN ENABLED, MAX_CLIENTS=%u, NUM_CHANNELS=%u\r\n",
+    LOG_INFO("[CORE] MODE: REAL CAN ENABLED, MAX_CLIENTS=%u, NUM_CHANNELS=%u\r\n",
                     (unsigned)MAX_CLIENTS, (unsigned)NUM_CHANNELS);
 #endif
 
-    DebugUART_Print("[CORE] eth_to_core_queue=%p core_to_eth_queue=%p\r\n",
+    LOG_INFO("[CORE] eth_to_core_queue=%p core_to_eth_queue=%p\r\n",
                     (void*)eth_to_core_queue, (void*)core_to_eth_queue);
 
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++)
     {
-        DebugUART_Print("[CORE] ch%u core_to_can_queue=%p can_to_core_queue=%p\r\n",
+        LOG_INFO("[CORE] ch%u core_to_can_queue=%p can_to_core_queue=%p\r\n",
                         (unsigned)ch,
                         (void*)core_to_can_queues[ch],
                         (void*)can_to_core_queues[ch]);
@@ -541,7 +543,8 @@ static void CoreTask(void *argument)
 
                 pending_cmd_valid = 0;
                 pending_timeout_drops++;
-                DebugUART_Print("[CORE] id=%u ch%u ERROR: frame dropped after %u ms waiting for queue space "
+                EventLog_Add(EVLOG_CMD_DROP, EVLOG_SRC_CLIENT(pending_cmd.client_id), 1U);
+                LOG_DBG("[CORE] id=%u ch%u ERROR: frame dropped after %u ms waiting for queue space "
                                 "(total timeout drops=%lu)\r\n",
                                 (unsigned)pending_cmd.client_id, (unsigned)pending_cmd.channel_id,
                                 (unsigned)CORE_PENDING_MAX_MS, (unsigned long)pending_timeout_drops);
@@ -575,7 +578,7 @@ static void CoreTask(void *argument)
                 heartbeat_processed++;
                 if ((heartbeat_processed % 5000U) == 0U)
                 {
-                    DebugUART_Print("[CORE] heartbeat: processed=%lu\r\n", (unsigned long)heartbeat_processed);
+                    LOG_DBG("[CORE] heartbeat: processed=%lu\r\n", (unsigned long)heartbeat_processed);
                 }
             }
         }
@@ -625,10 +628,10 @@ void CoreTask_Start(void)
 
     if (!coreTaskHandle)
     {
-        DebugUART_Print("[CORE] ERROR: task create failed\r\n");
+        LOG_ERR("[CORE] ERROR: task create failed\r\n");
     }
     else
     {
-        DebugUART_Print("[CORE] task created\r\n");
+        LOG_INFO("[CORE] task created\r\n");
     }
 }
