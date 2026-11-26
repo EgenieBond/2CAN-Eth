@@ -19,10 +19,12 @@
 #include "cmsis_os.h"
 #include "app_queues.h"
 #include "debug_uart.h"
+#include "event_log.h"
 #include "can_types.h"
 #include "main.h"
 #include "raw_tcp_server.h"   /* RawTcpServer_NotifyChannelDrained() -- страховка TCP backpressure */
 
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -170,7 +172,7 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
 
     if (hfdcan == NULL)
     {
-        DebugUART_Print("[CAN] id=%u ERROR: invalid channel_id\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] id=%u ERROR: invalid channel_id\r\n", (unsigned)channel_id);
         return -1;
     }
 
@@ -178,17 +180,17 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
     {
         if (HAL_FDCAN_Stop(hfdcan) != HAL_OK)
         {
-            DebugUART_Print("[CAN] ch%u ERROR: HAL_FDCAN_Stop failed before reopen\r\n",
+            LOG_ERR("[CAN] ch%u ERROR: HAL_FDCAN_Stop failed before reopen\r\n",
                             (unsigned)channel_id);
             return -1;
         }
         g_channels[channel_id].started = 0;
-        DebugUART_Print("[CAN] ch%u controller stopped before reopen\r\n", (unsigned)channel_id);
+        LOG_INFO("[CAN] ch%u controller stopped before reopen\r\n", (unsigned)channel_id);
     }
 
     if (CanTask_GetBitTiming(bitrate_bps, &bt) != 0)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: unsupported bitrate %lu bit/s\r\n",
+        LOG_ERR("[CAN] ch%u ERROR: unsupported bitrate %lu bit/s\r\n",
                         (unsigned)channel_id, (unsigned long)bitrate_bps);
         return -1;
     }
@@ -220,17 +222,17 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
         case CORE_CAN_MODE_SELF_RECEPTION:  hfdcan->Init.Mode = FDCAN_MODE_EXTERNAL_LOOPBACK; break;
 
         default:
-            DebugUART_Print("[CAN] ch%u ERROR: invalid mode in CanTask_Open\r\n", (unsigned)channel_id);
+            LOG_ERR("[CAN] ch%u ERROR: invalid mode in CanTask_Open\r\n", (unsigned)channel_id);
             return -1;
     }
 
     if (HAL_FDCAN_Init(hfdcan) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: HAL_FDCAN_Init failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: HAL_FDCAN_Init failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
-    DebugUART_Print("[CAN] ch%u NBTP=0x%08lX (prescaler=%lu sjw=%lu tseg1=%lu tseg2=%lu)\r\n",
+    LOG_INFO("[CAN] ch%u NBTP=0x%08lX (prescaler=%lu sjw=%lu tseg1=%lu tseg2=%lu)\r\n",
                     (unsigned)channel_id,
                     (unsigned long)hfdcan->Instance->NBTP,
                     (unsigned long)bt.prescaler,
@@ -247,7 +249,7 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
     sFilterConfig.FilterID2 = 0x000;
     if (HAL_FDCAN_ConfigFilter(hfdcan, &sFilterConfig) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: ConfigFilter (std) failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: ConfigFilter (std) failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
@@ -256,7 +258,7 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
     sFilterConfig.FilterID2 = 0x00000000;
     if (HAL_FDCAN_ConfigFilter(hfdcan, &sFilterConfig) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: ConfigFilter (ext) failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: ConfigFilter (ext) failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
@@ -266,7 +268,7 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
                                      FDCAN_REJECT_REMOTE,
                                      FDCAN_REJECT_REMOTE) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: ConfigGlobalFilter failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: ConfigGlobalFilter failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
@@ -274,19 +276,19 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
                                        FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
                                        FDCAN_INTERRUPT_LINE0) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: ConfigInterruptLines failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: ConfigInterruptLines failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
     if (HAL_FDCAN_ActivateNotification(hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: ActivateNotification failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: ActivateNotification failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
     if (HAL_FDCAN_Start(hfdcan) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: HAL_FDCAN_Start failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: HAL_FDCAN_Start failed\r\n", (unsigned)channel_id);
         return -1;
     }
 
@@ -298,8 +300,8 @@ int CanTask_Open(uint8_t channel_id, core_can_mode_t mode, uint32_t bitrate_bps)
     g_channels[channel_id].tx_fifo_stuck_drop_count = 0;
     g_channels[channel_id].add_message_fail_count = 0;
 
-    DebugUART_Print("[CAN] ch%u RX notification active\r\n", (unsigned)channel_id);
-    DebugUART_Print("[CAN] ch%u channel opened, mode=%lu bitrate=%lu bit/s\r\n",
+    LOG_INFO("[CAN] ch%u RX notification active\r\n", (unsigned)channel_id);
+    LOG_INFO("[CAN] ch%u channel opened, mode=%lu bitrate=%lu bit/s\r\n",
                     (unsigned)channel_id,
                     (unsigned long)hfdcan->Init.Mode,
                     (unsigned long)bitrate_bps);
@@ -315,25 +317,25 @@ int CanTask_Close(uint8_t channel_id)
 
     if (!g_channels[channel_id].started)
     {
-        DebugUART_Print("[CAN] ch%u close requested, already stopped\r\n", (unsigned)channel_id);
+        LOG_INFO("[CAN] ch%u close requested, already stopped\r\n", (unsigned)channel_id);
         return 0;
     }
 
     if (HAL_FDCAN_Stop(hfdcan) != HAL_OK)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: HAL_FDCAN_Stop failed on close\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: HAL_FDCAN_Stop failed on close\r\n", (unsigned)channel_id);
         return -1;
     }
 
     g_channels[channel_id].started = 0;
-    DebugUART_Print("[CAN] ch%u channel stopped\r\n", (unsigned)channel_id);
+    LOG_INFO("[CAN] ch%u channel stopped\r\n", (unsigned)channel_id);
 
     /* Сводка по приёму за время, пока канал был открыт -- безопасно
      * печатать здесь (обычный контекст задачи, не прерывание). Если
      * rx_queue_drop > 0 -- значит can_to_core_queue реально переполнялась
      * и часть принятых кадров была молча потеряна в
      * HAL_FDCAN_RxFifo0Callback() (там логировать нельзя -- ISR). */
-    DebugUART_Print("[CAN] ch%u RX stats: irq=%lu ok=%lu queue_drop=%lu\r\n",
+    LOG_INFO("[CAN] ch%u RX stats: irq=%lu ok=%lu queue_drop=%lu\r\n",
                     (unsigned)channel_id,
                     (unsigned long)g_channels[channel_id].rx_irq_count,
                     (unsigned long)g_channels[channel_id].rx_ok_count,
@@ -345,7 +347,7 @@ int CanTask_Close(uint8_t channel_id)
      * 100мс; add_message_fail -- сколько раз сам HAL_FDCAN_AddMessageToTxFifoQ
      * отказался добавить кадр (именно это оказалось причиной потери
      * одного кадра на границе count=292/293). */
-    DebugUART_Print("[CAN] ch%u TX stats: fifo_full_waits=%lu stuck_drop=%lu add_message_fail=%lu\r\n",
+    LOG_INFO("[CAN] ch%u TX stats: fifo_full_waits=%lu stuck_drop=%lu add_message_fail=%lu\r\n",
                     (unsigned)channel_id,
                     (unsigned long)g_channels[channel_id].tx_fifo_full_count,
                     (unsigned long)g_channels[channel_id].tx_fifo_stuck_drop_count,
@@ -364,8 +366,8 @@ static void CanTask(void *argument)
 
     uint32_t last_rx_queue_drop_count = 0;   /* для мгновенного оповещения о молчаливых потерях RX */
 
-    DebugUART_Print("[CAN] ch%u CanTask started\r\n", (unsigned)channel_id);
-    DebugUART_Print("[CAN] ch%u core_to_can_queue=%p can_to_core_queue=%p\r\n",
+    LOG_INFO("[CAN] ch%u CanTask started\r\n", (unsigned)channel_id);
+    LOG_INFO("[CAN] ch%u core_to_can_queue=%p can_to_core_queue=%p\r\n",
                     (unsigned)channel_id,
                     (void*)core_to_can_queues[channel_id],
                     (void*)can_to_core_queues[channel_id]);
@@ -392,7 +394,7 @@ static void CanTask(void *argument)
             if (g_channels[channel_id].rx_queue_drop_count != last_rx_queue_drop_count)
             {
                 last_rx_queue_drop_count = g_channels[channel_id].rx_queue_drop_count;
-                DebugUART_Print("[CAN] ch%u ERROR: can_to_core_queue FULL -- RX frame(s) silently "
+                LOG_DBG("[CAN] ch%u ERROR: can_to_core_queue FULL -- RX frame(s) silently "
                                 "dropped in ISR, total=%lu\r\n",
                                 (unsigned)channel_id,
                                 (unsigned long)last_rx_queue_drop_count);
@@ -403,7 +405,7 @@ static void CanTask(void *argument)
 
             if (CanTask_BuildTxHeader(&can_msg.frame, &tx_hdr) != 0)
             {
-                DebugUART_Print("[CAN] ch%u ERROR: failed to build TX header\r\n", (unsigned)channel_id);
+                LOG_DBG("[CAN] ch%u ERROR: failed to build TX header\r\n", (unsigned)channel_id);
                 continue;
             }
 
@@ -433,7 +435,8 @@ static void CanTask(void *argument)
                     if ((osKernelGetTickCount() - wait_start) > 100U)
                     {
                         g_channels[channel_id].tx_fifo_stuck_drop_count++;
-                        DebugUART_Print("[CAN] ch%u ERROR: TX FIFO stuck full for 100ms -- "
+                        EventLog_Add(EVLOG_CAN_TX_DROP, EVLOG_SRC_CHANNEL(channel_id), 1U);
+                        LOG_DBG("[CAN] ch%u ERROR: TX FIFO stuck full for 100ms -- "
                                         "dropping frame (bus-off?) drop_count=%lu PSR=0x%08lX\r\n",
                                         (unsigned)channel_id,
                                         (unsigned long)g_channels[channel_id].tx_fifo_stuck_drop_count,
@@ -444,7 +447,7 @@ static void CanTask(void *argument)
 
                     if ((g_channels[channel_id].tx_fifo_full_count % 2000U) == 0U)
                     {
-                        DebugUART_Print("[CAN] ch%u WARNING: waiting for TX FIFO space (count=%lu) TXFQS=0x%08lX PSR=0x%08lX\r\n",
+                        LOG_DBG("[CAN] ch%u WARNING: waiting for TX FIFO space (count=%lu) TXFQS=0x%08lX PSR=0x%08lX\r\n",
                                         (unsigned)channel_id,
                                         (unsigned long)g_channels[channel_id].tx_fifo_full_count,
                                         (unsigned long)hfdcan->Instance->TXFQS,
@@ -463,6 +466,7 @@ static void CanTask(void *argument)
             if (HAL_FDCAN_AddMessageToTxFifoQ(hfdcan, &tx_hdr, tx_data) != HAL_OK)
             {
                 g_channels[channel_id].add_message_fail_count++;
+                EventLog_Add(EVLOG_CAN_TX_DROP, EVLOG_SRC_CHANNEL(channel_id), 1U);
 
                 /* Раньше печаталась только КАЖДАЯ 200-я ошибка -- удобно
                  * при массовом сбое, но единичный редкий провал (ровно
@@ -475,7 +479,7 @@ static void CanTask(void *argument)
                     ((g_channels[channel_id].add_message_fail_count % 200U) == 0U))
                 {
                     uint32_t err = HAL_FDCAN_GetError(hfdcan);
-                    DebugUART_Print("[CAN] ch%u ERROR: AddMessageToTxFifoQ failed (count=%lu) "
+                    LOG_DBG("[CAN] ch%u ERROR: AddMessageToTxFifoQ failed (count=%lu) "
                                     "err=0x%08lX TXFQS=0x%08lX PSR=0x%08lX\r\n",
                                     (unsigned)channel_id,
                                     (unsigned long)g_channels[channel_id].add_message_fail_count,
@@ -492,7 +496,7 @@ void CanTask_Start(uint8_t channel_id)
 {
     if (channel_id >= NUM_CHANNELS)
     {
-        DebugUART_Print("[CAN] ERROR: CanTask_Start invalid channel_id=%u\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ERROR: CanTask_Start invalid channel_id=%u\r\n", (unsigned)channel_id);
         return;
     }
 
@@ -512,11 +516,11 @@ void CanTask_Start(uint8_t channel_id)
 
     if (!g_channels[channel_id].task_handle)
     {
-        DebugUART_Print("[CAN] ch%u ERROR: task create failed\r\n", (unsigned)channel_id);
+        LOG_ERR("[CAN] ch%u ERROR: task create failed\r\n", (unsigned)channel_id);
     }
     else
     {
-        DebugUART_Print("[CAN] ch%u task created\r\n", (unsigned)channel_id);
+        LOG_INFO("[CAN] ch%u task created\r\n", (unsigned)channel_id);
     }
 }
 
@@ -585,5 +589,6 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     if (osMessageQueuePut(can_to_core_queues[channel_id], &can_msg, 0, 0) != osOK)
     {
         g_channels[channel_id].rx_queue_drop_count++;
+        EventLog_Add(EVLOG_CAN_RX_DROP, EVLOG_SRC_CHANNEL(channel_id), 1U);   /* можно из прерывания */
     }
 }
