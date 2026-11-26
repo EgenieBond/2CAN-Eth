@@ -28,3 +28,4 @@
 - Mcu.IP0=CORTEX_M7
 - MxCube.Version=6.13.0
 - ProjectManager.FirmwarePackage=STM32Cube FW_H7 V1.12.0
+- PyCharm на Python 3.10 с использованием vs_can_lib

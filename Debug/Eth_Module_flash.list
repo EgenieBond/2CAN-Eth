@@ -7611,7 +7611,7 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 /* FreeRTOS heap: обязательно 8-byte alignment для CM7 */
 __attribute__((aligned(8))) uint8_t ucHeap[ configTOTAL_HEAP_SIZE ];
 
-void vApplicationMallocFailedHook(void)
+static int EventLog_IsBackground(evlog_type_t type)
 {
  80037a8:	b580      	push	{r7, lr}
  80037aa:	af00      	add	r7, sp, #0
@@ -50064,13 +50064,13 @@ TCB_t *pxTCB;
  8013544:	429a      	cmp	r2, r3
  8013546:	d10d      	bne.n	8013564 <vTaskPriorityDisinheritAfterTimeout+0x8c>
 	__asm volatile
- 8013548:	f04f 0350 	mov.w	r3, #80	@ 0x50
- 801354c:	b672      	cpsid	i
- 801354e:	f383 8811 	msr	BASEPRI, r3
- 8013552:	f3bf 8f6f 	isb	sy
- 8013556:	f3bf 8f4f 	dsb	sy
- 801355a:	b662      	cpsie	i
- 801355c:	60bb      	str	r3, [r7, #8]
+ 8014054:	f04f 0350 	mov.w	r3, #80	@ 0x50
+ 8014058:	b672      	cpsid	i
+ 801405a:	f383 8811 	msr	BASEPRI, r3
+ 801405e:	f3bf 8f6f 	isb	sy
+ 8014062:	f3bf 8f4f 	dsb	sy
+ 8014066:	b662      	cpsie	i
+ 8014068:	60bb      	str	r3, [r7, #8]
 }
  801355e:	bf00      	nop
  8013560:	bf00      	nop
